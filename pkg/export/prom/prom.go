@@ -16,6 +16,7 @@ import (
 
 	"go.opentelemetry.io/obi/pkg/appolly/app"
 	"go.opentelemetry.io/obi/pkg/appolly/app/request"
+	"go.opentelemetry.io/obi/pkg/internal/hami"
 	"go.opentelemetry.io/obi/pkg/appolly/app/svc"
 	"go.opentelemetry.io/obi/pkg/appolly/discover/exec"
 	"go.opentelemetry.io/obi/pkg/appolly/meta"
@@ -160,6 +161,10 @@ type PrometheusConfig struct {
 	// beforehand. For example, to add the OTEL deployment.environment resource attribute as a Prometheus resource attribute,
 	// you should add `deployment.environment`.
 	ExtraSpanResourceLabels []string `yaml:"extra_span_resource_attributes" env:"OTEL_EBPF_PROMETHEUS_EXTRA_SPAN_RESOURCE_ATTRIBUTES" envSeparator:","`
+
+	// HAMiContainerDir is the host path containing {podUID}_{containerName}/ subdirectories
+	// written by HAMi-core. Set to "-" to disable. Defaults to /usr/local/vgpu/containers.
+	HAMiContainerDir string `yaml:"hami_container_dir" env:"OTEL_EBPF_HAMI_CONTAINER_DIR"`
 }
 
 func mlog() *slog.Logger {
@@ -210,6 +215,16 @@ type metricsReporter struct {
 	attrCudaKernelGridSize     []attributes.Field[*request.Span, string]
 	attrCudaKernelBlockSize    []attributes.Field[*request.Span, string]
 	attrCudaMemoryCopies       []attributes.Field[*request.Span, string]
+	attrCudaStreamSync         []attributes.Field[*request.Span, string]
+	attrCudaDeviceSync         []attributes.Field[*request.Span, string]
+	attrCudaEventSync          []attributes.Field[*request.Span, string]
+	attrCudaMemoryFrees        []attributes.Field[*request.Span, string]
+	attrCudaMemoryFreeCalls    []attributes.Field[*request.Span, string]
+	attrCudaMemoryMemset       []attributes.Field[*request.Span, string]
+	attrCudaMemoryPeerCopies   []attributes.Field[*request.Span, string]
+	attrCudaKernelLaunchDur    []attributes.Field[*request.Span, string]
+	attrCudaMemoryAllocCalls   []attributes.Field[*request.Span, string]
+	attrCudaErrors             []attributes.Field[*request.Span, string]
 	attrSvcGraph               []attributes.Field[*request.Span, string]
 	attrDNSLookupDuration      []attributes.Field[*request.Span, string]
 	attrGenAIClientDuration    []attributes.Field[*request.Span, string]
@@ -237,6 +252,16 @@ type metricsReporter struct {
 	cudaKernelGridSize    *Expirer[prometheus.Histogram]
 	cudaKernelBlockSize   *Expirer[prometheus.Histogram]
 	cudaMemoryCopySize    *Expirer[prometheus.Histogram]
+	cudaStreamSyncDur     *Expirer[prometheus.Histogram]
+	cudaDeviceSyncDur     *Expirer[prometheus.Histogram]
+	cudaEventSyncDur      *Expirer[prometheus.Histogram]
+	cudaMemoryFreesTotal  *Expirer[prometheus.Counter]
+	cudaMemoryFreeCalls   *Expirer[prometheus.Counter]
+	cudaMemoryMemset      *Expirer[prometheus.Histogram]
+	cudaMemoryPeerCopies  *Expirer[prometheus.Histogram]
+	cudaKernelLaunchDur   *Expirer[prometheus.Histogram]
+	cudaMemoryAllocCalls  *Expirer[prometheus.Counter]
+	cudaErrors            *Expirer[prometheus.Counter]
 
 	// dns related metrics
 	dnsLookupDuration *Expirer[prometheus.Histogram]
@@ -260,6 +285,10 @@ type metricsReporter struct {
 
 	serviceMap  map[svc.UID]svc.Attrs
 	pidsTracker otel.PidServiceTracker
+
+	// HAMi cache poller
+	hamiMetrics *hamiGauges
+	hamiContDir string
 
 	// for testing purposes
 	createEventMetrics func(service *svc.Attrs)
@@ -375,6 +404,16 @@ func newReporter(
 	var attrCudaKernelGridSize []attributes.Field[*request.Span, string]
 	var attrCudaKernelBlockSize []attributes.Field[*request.Span, string]
 	var attrCudaMemoryCopies []attributes.Field[*request.Span, string]
+	var attrCudaStreamSync []attributes.Field[*request.Span, string]
+	var attrCudaDeviceSync []attributes.Field[*request.Span, string]
+	var attrCudaEventSync []attributes.Field[*request.Span, string]
+	var attrCudaMemoryFrees []attributes.Field[*request.Span, string]
+	var attrCudaMemoryFreeCalls []attributes.Field[*request.Span, string]
+	var attrCudaMemoryMemset []attributes.Field[*request.Span, string]
+	var attrCudaMemoryPeerCopies []attributes.Field[*request.Span, string]
+	var attrCudaKernelLaunchDur []attributes.Field[*request.Span, string]
+	var attrCudaMemoryAllocCalls []attributes.Field[*request.Span, string]
+	var attrCudaErrors []attributes.Field[*request.Span, string]
 
 	if is.GPUEnabled() {
 		attrCudaKernelLaunchCalls = attributes.PrometheusGetters(attributeGetters,
@@ -389,6 +428,26 @@ func newReporter(
 			attrsProvider.For(attributes.GPUCudaKernelBlockSize))
 		attrCudaMemoryCopies = attributes.PrometheusGetters(attributeGetters,
 			attrsProvider.For(attributes.GPUCudaMemoryCopies))
+		attrCudaStreamSync = attributes.PrometheusGetters(attributeGetters,
+			attrsProvider.For(attributes.GPUCudaStreamSyncDuration))
+		attrCudaDeviceSync = attributes.PrometheusGetters(attributeGetters,
+			attrsProvider.For(attributes.GPUCudaDeviceSyncDuration))
+		attrCudaEventSync = attributes.PrometheusGetters(attributeGetters,
+			attrsProvider.For(attributes.GPUCudaEventSyncDuration))
+		attrCudaMemoryFrees = attributes.PrometheusGetters(attributeGetters,
+			attrsProvider.For(attributes.GPUCudaMemoryFrees))
+		attrCudaMemoryFreeCalls = attributes.PrometheusGetters(attributeGetters,
+			attrsProvider.For(attributes.GPUCudaMemoryFreeCalls))
+		attrCudaMemoryMemset = attributes.PrometheusGetters(attributeGetters,
+			attrsProvider.For(attributes.GPUCudaMemoryMemset))
+		attrCudaMemoryPeerCopies = attributes.PrometheusGetters(attributeGetters,
+			attrsProvider.For(attributes.GPUCudaMemoryPeerCopies))
+		attrCudaKernelLaunchDur = attributes.PrometheusGetters(attributeGetters,
+			attrsProvider.For(attributes.GPUCudaKernelLaunchDuration))
+		attrCudaMemoryAllocCalls = attributes.PrometheusGetters(attributeGetters,
+			attrsProvider.For(attributes.GPUCudaMemoryAllocCalls))
+		attrCudaErrors = attributes.PrometheusGetters(attributeGetters,
+			attrsProvider.For(attributes.GPUCudaErrors))
 	}
 
 	var attrDNSLookupDuration []attributes.Field[*request.Span, string]
@@ -461,6 +520,16 @@ func newReporter(
 		attrCudaKernelGridSize:     attrCudaKernelGridSize,
 		attrCudaKernelBlockSize:    attrCudaKernelBlockSize,
 		attrCudaMemoryCopies:       attrCudaMemoryCopies,
+		attrCudaStreamSync:         attrCudaStreamSync,
+		attrCudaDeviceSync:         attrCudaDeviceSync,
+		attrCudaEventSync:          attrCudaEventSync,
+		attrCudaMemoryFrees:        attrCudaMemoryFrees,
+		attrCudaMemoryFreeCalls:    attrCudaMemoryFreeCalls,
+		attrCudaMemoryMemset:       attrCudaMemoryMemset,
+		attrCudaMemoryPeerCopies:   attrCudaMemoryPeerCopies,
+		attrCudaKernelLaunchDur:    attrCudaKernelLaunchDur,
+		attrCudaMemoryAllocCalls:   attrCudaMemoryAllocCalls,
+		attrCudaErrors:             attrCudaErrors,
 		attrDNSLookupDuration:      attrDNSLookupDuration,
 		attrGenAIClientDuration:    attrGenAIClientDuration,
 		attrGenAIInputTokenUsage:   attrGenAIInputTokenUsage,
@@ -713,6 +782,90 @@ func newReporter(
 				NativeHistogramMinResetDuration: defaultHistogramMinResetDuration,
 			}, labelNames(attrCudaMemoryCopies)).MetricVec, clock.Time, cfg.TTL)
 		}),
+		cudaStreamSyncDur: optionalHistogramProvider(is.GPUEnabled(), func() *Expirer[prometheus.Histogram] {
+			return NewExpirer[prometheus.Histogram](prometheus.NewHistogramVec(prometheus.HistogramOpts{
+				Name:                            attributes.GPUCudaStreamSyncDuration.Prom,
+				Help:                            "duration of CUDA stream synchronize calls in seconds",
+				Buckets:                         cfg.Buckets.DurationHistogram,
+				NativeHistogramBucketFactor:     defaultHistogramBucketFactor,
+				NativeHistogramMaxBucketNumber:  defaultHistogramMaxBucketNumber,
+				NativeHistogramMinResetDuration: defaultHistogramMinResetDuration,
+			}, labelNames(attrCudaStreamSync)).MetricVec, clock.Time, cfg.TTL)
+		}),
+		cudaDeviceSyncDur: optionalHistogramProvider(is.GPUEnabled(), func() *Expirer[prometheus.Histogram] {
+			return NewExpirer[prometheus.Histogram](prometheus.NewHistogramVec(prometheus.HistogramOpts{
+				Name:                            attributes.GPUCudaDeviceSyncDuration.Prom,
+				Help:                            "duration of CUDA device synchronize calls in seconds",
+				Buckets:                         cfg.Buckets.DurationHistogram,
+				NativeHistogramBucketFactor:     defaultHistogramBucketFactor,
+				NativeHistogramMaxBucketNumber:  defaultHistogramMaxBucketNumber,
+				NativeHistogramMinResetDuration: defaultHistogramMinResetDuration,
+			}, labelNames(attrCudaDeviceSync)).MetricVec, clock.Time, cfg.TTL)
+		}),
+		cudaEventSyncDur: optionalHistogramProvider(is.GPUEnabled(), func() *Expirer[prometheus.Histogram] {
+			return NewExpirer[prometheus.Histogram](prometheus.NewHistogramVec(prometheus.HistogramOpts{
+				Name:                            attributes.GPUCudaEventSyncDuration.Prom,
+				Help:                            "duration of CUDA event synchronize calls in seconds",
+				Buckets:                         cfg.Buckets.DurationHistogram,
+				NativeHistogramBucketFactor:     defaultHistogramBucketFactor,
+				NativeHistogramMaxBucketNumber:  defaultHistogramMaxBucketNumber,
+				NativeHistogramMinResetDuration: defaultHistogramMinResetDuration,
+			}, labelNames(attrCudaEventSync)).MetricVec, clock.Time, cfg.TTL)
+		}),
+		cudaMemoryFreesTotal: optionalCounterProvider(is.GPUEnabled(), func() *Expirer[prometheus.Counter] {
+			return NewExpirer[prometheus.Counter](prometheus.NewCounterVec(prometheus.CounterOpts{
+				Name: attributes.GPUCudaMemoryFrees.Prom,
+				Help: "amount of NVIDIA GPU cuda freed memory in bytes",
+			}, labelNames(attrCudaMemoryFrees)).MetricVec, clock.Time, cfg.TTL)
+		}),
+		cudaMemoryFreeCalls: optionalCounterProvider(is.GPUEnabled(), func() *Expirer[prometheus.Counter] {
+			return NewExpirer[prometheus.Counter](prometheus.NewCounterVec(prometheus.CounterOpts{
+				Name: attributes.GPUCudaMemoryFreeCalls.Prom,
+				Help: "number of NVIDIA GPU cuda free calls",
+			}, labelNames(attrCudaMemoryFreeCalls)).MetricVec, clock.Time, cfg.TTL)
+		}),
+		cudaMemoryMemset: optionalHistogramProvider(is.GPUEnabled(), func() *Expirer[prometheus.Histogram] {
+			return NewExpirer[prometheus.Histogram](prometheus.NewHistogramVec(prometheus.HistogramOpts{
+				Name:                            attributes.GPUCudaMemoryMemset.Prom,
+				Help:                            "amount of NVIDIA GPU cuda memory initialized via memset in bytes",
+				Buckets:                         cfg.Buckets.RequestSizeHistogram,
+				NativeHistogramBucketFactor:     defaultHistogramBucketFactor,
+				NativeHistogramMaxBucketNumber:  defaultHistogramMaxBucketNumber,
+				NativeHistogramMinResetDuration: defaultHistogramMinResetDuration,
+			}, labelNames(attrCudaMemoryMemset)).MetricVec, clock.Time, cfg.TTL)
+		}),
+		cudaMemoryPeerCopies: optionalHistogramProvider(is.GPUEnabled(), func() *Expirer[prometheus.Histogram] {
+			return NewExpirer[prometheus.Histogram](prometheus.NewHistogramVec(prometheus.HistogramOpts{
+				Name:                            attributes.GPUCudaMemoryPeerCopies.Prom,
+				Help:                            "amount of NVIDIA GPU cuda peer-to-peer memory copies in bytes",
+				Buckets:                         cfg.Buckets.RequestSizeHistogram,
+				NativeHistogramBucketFactor:     defaultHistogramBucketFactor,
+				NativeHistogramMaxBucketNumber:  defaultHistogramMaxBucketNumber,
+				NativeHistogramMinResetDuration: defaultHistogramMinResetDuration,
+			}, labelNames(attrCudaMemoryPeerCopies)).MetricVec, clock.Time, cfg.TTL)
+		}),
+		cudaKernelLaunchDur: optionalHistogramProvider(is.GPUEnabled(), func() *Expirer[prometheus.Histogram] {
+			return NewExpirer[prometheus.Histogram](prometheus.NewHistogramVec(prometheus.HistogramOpts{
+				Name:                            attributes.GPUCudaKernelLaunchDuration.Prom,
+				Help:                            "host-side latency of cuLaunchKernel calls in seconds",
+				Buckets:                         cfg.Buckets.DurationHistogram,
+				NativeHistogramBucketFactor:     defaultHistogramBucketFactor,
+				NativeHistogramMaxBucketNumber:  defaultHistogramMaxBucketNumber,
+				NativeHistogramMinResetDuration: defaultHistogramMinResetDuration,
+			}, labelNames(attrCudaKernelLaunchDur)).MetricVec, clock.Time, cfg.TTL)
+		}),
+		cudaMemoryAllocCalls: optionalCounterProvider(is.GPUEnabled(), func() *Expirer[prometheus.Counter] {
+			return NewExpirer[prometheus.Counter](prometheus.NewCounterVec(prometheus.CounterOpts{
+				Name: attributes.GPUCudaMemoryAllocCalls.Prom,
+				Help: "number of NVIDIA GPU cuda memory allocation calls",
+			}, labelNames(attrCudaMemoryAllocCalls)).MetricVec, clock.Time, cfg.TTL)
+		}),
+		cudaErrors: optionalCounterProvider(is.GPUEnabled(), func() *Expirer[prometheus.Counter] {
+			return NewExpirer[prometheus.Counter](prometheus.NewCounterVec(prometheus.CounterOpts{
+				Name: attributes.GPUCudaErrors.Prom,
+				Help: "number of NVIDIA GPU cuda API errors",
+			}, labelNames(attrCudaErrors)).MetricVec, clock.Time, cfg.TTL)
+		}),
 		dnsLookupDuration: optionalHistogramProvider(is.DNSEnabled(), func() *Expirer[prometheus.Histogram] {
 			return NewExpirer[prometheus.Histogram](prometheus.NewHistogramVec(prometheus.HistogramOpts{
 				Name:                            attributes.DNSLookupDuration.Prom,
@@ -837,7 +990,27 @@ func newReporter(
 			mr.cudaKernelGridSize,
 			mr.cudaKernelBlockSize,
 			mr.cudaMemoryCopySize,
+			mr.cudaStreamSyncDur,
+			mr.cudaDeviceSyncDur,
+			mr.cudaEventSyncDur,
+			mr.cudaMemoryFreesTotal,
+			mr.cudaMemoryFreeCalls,
+			mr.cudaMemoryMemset,
+			mr.cudaMemoryPeerCopies,
+			mr.cudaKernelLaunchDur,
+			mr.cudaMemoryAllocCalls,
+			mr.cudaErrors,
 		)
+	}
+
+	if is.GPUEnabled() && cfg.HAMiContainerDir != "-" {
+		mr.hamiMetrics = newHamiGauges()
+		contDir := cfg.HAMiContainerDir
+		if contDir == "" {
+			contDir = hami.DefaultContainerDir
+		}
+		mr.hamiContDir = contDir
+		registeredMetrics = append(registeredMetrics, mr.hamiMetrics.collectors()...)
 	}
 
 	if mr.cfg.Registry != nil {
@@ -897,6 +1070,7 @@ func (r *metricsReporter) reportMetrics(ctx context.Context) {
 }
 
 func (r *metricsReporter) collectMetrics(ctx context.Context) {
+	startHamiPoller(ctx, r.hamiMetrics, r.hamiContDir)
 	go r.watchForProcessEvents(ctx)
 	swarms.ForEachInput(ctx, r.input, nil, func(spans []request.Span) {
 		// clock needs to be updated to let the expirer
@@ -1060,10 +1234,48 @@ func (r *metricsReporter) observe(span *request.Span) {
 		case request.EventTypeGPUCudaMalloc:
 			if r.is.GPUEnabled() {
 				r.addCounter(r.cudaMemoryAllocsTotal.WithLabelValues(labelValues(span, r.attrCudaMemoryAllocs)...).Metric, float64(span.ContentLength), span)
+				r.addCounter(r.cudaMemoryAllocCalls.WithLabelValues(labelValues(span, r.attrCudaMemoryAllocCalls)...).Metric, 1, span)
 			}
 		case request.EventTypeGPUCudaMemcpy:
 			if r.is.GPUEnabled() {
 				r.observeHistogram(r.cudaMemoryCopySize.WithLabelValues(labelValues(span, r.attrCudaMemoryCopies)...).Metric, float64(span.ContentLength), span)
+			}
+		case request.EventTypeGPUCudaStreamSync:
+			if r.is.GPUEnabled() {
+				r.observeHistogram(r.cudaStreamSyncDur.WithLabelValues(labelValues(span, r.attrCudaStreamSync)...).Metric, duration, span)
+			}
+		case request.EventTypeGPUCudaDeviceSync:
+			if r.is.GPUEnabled() {
+				r.observeHistogram(r.cudaDeviceSyncDur.WithLabelValues(labelValues(span, r.attrCudaDeviceSync)...).Metric, duration, span)
+			}
+		case request.EventTypeGPUCudaEventSync:
+			if r.is.GPUEnabled() {
+				r.observeHistogram(r.cudaEventSyncDur.WithLabelValues(labelValues(span, r.attrCudaEventSync)...).Metric, duration, span)
+			}
+		case request.EventTypeGPUCudaFree:
+			if r.is.GPUEnabled() {
+				freeBytes := float64(span.ContentLength)
+				if freeBytes < 0 {
+					freeBytes = 0
+				}
+				r.addCounter(r.cudaMemoryFreesTotal.WithLabelValues(labelValues(span, r.attrCudaMemoryFrees)...).Metric, freeBytes, span)
+				r.addCounter(r.cudaMemoryFreeCalls.WithLabelValues(labelValues(span, r.attrCudaMemoryFreeCalls)...).Metric, 1, span)
+			}
+		case request.EventTypeGPUCudaMemset:
+			if r.is.GPUEnabled() {
+				r.observeHistogram(r.cudaMemoryMemset.WithLabelValues(labelValues(span, r.attrCudaMemoryMemset)...).Metric, float64(span.ContentLength), span)
+			}
+		case request.EventTypeGPUCudaPeerCopy:
+			if r.is.GPUEnabled() {
+				r.observeHistogram(r.cudaMemoryPeerCopies.WithLabelValues(labelValues(span, r.attrCudaMemoryPeerCopies)...).Metric, float64(span.ContentLength), span)
+			}
+		case request.EventTypeGPUCudaKernelLaunchDone:
+			if r.is.GPUEnabled() {
+				r.observeHistogram(r.cudaKernelLaunchDur.WithLabelValues(labelValues(span, r.attrCudaKernelLaunchDur)...).Metric, duration, span)
+			}
+		case request.EventTypeGPUCudaError:
+			if r.is.GPUEnabled() {
+				r.addCounter(r.cudaErrors.WithLabelValues(labelValues(span, r.attrCudaErrors)...).Metric, 1, span)
 			}
 		case request.EventTypeDNS:
 			if r.is.DNSEnabled() {

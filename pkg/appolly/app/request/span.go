@@ -48,6 +48,14 @@ const (
 	EventTypeGPUCudaGraphLaunch
 	EventTypeGPUCudaMalloc
 	EventTypeGPUCudaMemcpy
+	EventTypeGPUCudaStreamSync
+	EventTypeGPUCudaDeviceSync
+	EventTypeGPUCudaEventSync
+	EventTypeGPUCudaFree
+	EventTypeGPUCudaMemset
+	EventTypeGPUCudaPeerCopy
+	EventTypeGPUCudaKernelLaunchDone
+	EventTypeGPUCudaError
 	EventTypeFailedConnect
 	EventTypeDNS
 	EventTypeCouchbaseClient
@@ -143,6 +151,22 @@ func (t EventType) String() string {
 		return "CUDAMalloc"
 	case EventTypeGPUCudaMemcpy:
 		return "CUDAMemcpy"
+	case EventTypeGPUCudaStreamSync:
+		return "CUDAStreamSync"
+	case EventTypeGPUCudaDeviceSync:
+		return "CUDADeviceSync"
+	case EventTypeGPUCudaEventSync:
+		return "CUDAEventSync"
+	case EventTypeGPUCudaFree:
+		return "CUDAFree"
+	case EventTypeGPUCudaMemset:
+		return "CUDAMemset"
+	case EventTypeGPUCudaPeerCopy:
+		return "CUDAPeerCopy"
+	case EventTypeGPUCudaKernelLaunchDone:
+		return "CUDALaunchKernelDone"
+	case EventTypeGPUCudaError:
+		return "CUDAError"
 	case EventTypeMongoClient:
 		return "MongoClient"
 	case EventTypeManualSpan:
@@ -837,6 +861,31 @@ func spanAttributes(s *Span) SpanAttributes {
 		return SpanAttributes{
 			"size": strconv.FormatInt(s.ContentLength, 10),
 			"kind": CudaMemcpyName(s.SubType),
+		}
+	case EventTypeGPUCudaStreamSync, EventTypeGPUCudaDeviceSync, EventTypeGPUCudaEventSync:
+		return SpanAttributes{}
+	case EventTypeGPUCudaFree:
+		return SpanAttributes{
+			"size":     strconv.FormatInt(s.ContentLength, 10),
+			"mem_kind": CudaMemKindName(s.SubType),
+		}
+	case EventTypeGPUCudaMemset:
+		return SpanAttributes{
+			"size":  strconv.FormatInt(s.ContentLength, 10),
+			"async": strconv.Itoa(s.SubType),
+		}
+	case EventTypeGPUCudaPeerCopy:
+		return SpanAttributes{
+			"size":       strconv.FormatInt(s.ContentLength, 10),
+			"src_device": strconv.Itoa(s.SubType >> 16),
+			"dst_device": strconv.Itoa(s.SubType & 0xFFFF),
+		}
+	case EventTypeGPUCudaKernelLaunchDone:
+		return SpanAttributes{}
+	case EventTypeGPUCudaError:
+		return SpanAttributes{
+			"function":   CudaFuncName(int(s.ContentLength)),
+			"error_code": strconv.Itoa(s.SubType),
 		}
 	case EventTypeMongoClient:
 		return SpanAttributes{

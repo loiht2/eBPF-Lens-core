@@ -17,11 +17,14 @@ const (
 )
 
 func (b *CudaMode) UnmarshalText(text []byte) error {
+	// YAML parses bare `on`/`yes`/`true` as boolean true, and `off`/`no`/`false`
+	// as boolean false. Accept those boolean-stringified forms as aliases so that
+	// unquoted `instrument_cuda: on` in a ConfigMap or helm values file works.
 	switch strings.TrimSpace(string(text)) {
-	case "on":
+	case "on", "true", "yes":
 		*b = CudaModeOn
 		return nil
-	case "off":
+	case "off", "false", "no":
 		*b = CudaModeOff
 		return nil
 	case "auto":

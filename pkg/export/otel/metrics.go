@@ -102,6 +102,16 @@ type MetricsReporter struct {
 	attrGPUKernelBlockSize     []attributes.Field[*request.Span, attribute.KeyValue]
 	attrGPUMemoryAllocations   []attributes.Field[*request.Span, attribute.KeyValue]
 	attrGPUMemoryCopies        []attributes.Field[*request.Span, attribute.KeyValue]
+	attrGPUStreamSync          []attributes.Field[*request.Span, attribute.KeyValue]
+	attrGPUDeviceSync          []attributes.Field[*request.Span, attribute.KeyValue]
+	attrGPUEventSync           []attributes.Field[*request.Span, attribute.KeyValue]
+	attrGPUMemoryFrees         []attributes.Field[*request.Span, attribute.KeyValue]
+	attrGPUMemoryFreeCalls     []attributes.Field[*request.Span, attribute.KeyValue]
+	attrGPUMemoryMemset        []attributes.Field[*request.Span, attribute.KeyValue]
+	attrGPUMemoryPeerCopies    []attributes.Field[*request.Span, attribute.KeyValue]
+	attrGPUKernelLaunchDur     []attributes.Field[*request.Span, attribute.KeyValue]
+	attrGPUMemoryAllocCalls    []attributes.Field[*request.Span, attribute.KeyValue]
+	attrGPUErrors              []attributes.Field[*request.Span, attribute.KeyValue]
 	attrDNSLookupDuration      []attributes.Field[*request.Span, attribute.KeyValue]
 	attrGenAIInputTokenUsage   []attributes.Field[*request.Span, attribute.KeyValue]
 	attrGenAIOutputTokenUsage  []attributes.Field[*request.Span, attribute.KeyValue]
@@ -149,6 +159,16 @@ type Metrics struct {
 	gpuKernelGridSize    *Expirer[*request.Span, instrument.Float64Histogram, float64]
 	gpuKernelBlockSize   *Expirer[*request.Span, instrument.Float64Histogram, float64]
 	gpuMemoryCopySize    *Expirer[*request.Span, instrument.Float64Histogram, float64]
+	gpuStreamSyncDur     *Expirer[*request.Span, instrument.Float64Histogram, float64]
+	gpuDeviceSyncDur     *Expirer[*request.Span, instrument.Float64Histogram, float64]
+	gpuEventSyncDur      *Expirer[*request.Span, instrument.Float64Histogram, float64]
+	gpuMemoryFreesTotal  *Expirer[*request.Span, instrument.Int64Counter, int64]
+	gpuMemoryFreeCalls   *Expirer[*request.Span, instrument.Int64Counter, int64]
+	gpuMemoryMemset      *Expirer[*request.Span, instrument.Float64Histogram, float64]
+	gpuMemoryPeerCopies  *Expirer[*request.Span, instrument.Float64Histogram, float64]
+	gpuKernelLaunchDur   *Expirer[*request.Span, instrument.Float64Histogram, float64]
+	gpuMemoryAllocCalls  *Expirer[*request.Span, instrument.Int64Counter, int64]
+	gpuErrors            *Expirer[*request.Span, instrument.Int64Counter, int64]
 	// dns
 	dnsLookupDuration *Expirer[*request.Span, instrument.Float64Histogram, float64]
 	// genai
@@ -285,6 +305,26 @@ func newMetricsReporter(
 			mr.attrGetters, mr.attributes.For(attributes.GPUCudaKernelBlockSize))
 		mr.attrGPUMemoryCopies = attributes.OpenTelemetryGetters(
 			mr.attrGetters, mr.attributes.For(attributes.GPUCudaMemoryCopies))
+		mr.attrGPUStreamSync = attributes.OpenTelemetryGetters(
+			mr.attrGetters, mr.attributes.For(attributes.GPUCudaStreamSyncDuration))
+		mr.attrGPUDeviceSync = attributes.OpenTelemetryGetters(
+			mr.attrGetters, mr.attributes.For(attributes.GPUCudaDeviceSyncDuration))
+		mr.attrGPUEventSync = attributes.OpenTelemetryGetters(
+			mr.attrGetters, mr.attributes.For(attributes.GPUCudaEventSyncDuration))
+		mr.attrGPUMemoryFrees = attributes.OpenTelemetryGetters(
+			mr.attrGetters, mr.attributes.For(attributes.GPUCudaMemoryFrees))
+		mr.attrGPUMemoryFreeCalls = attributes.OpenTelemetryGetters(
+			mr.attrGetters, mr.attributes.For(attributes.GPUCudaMemoryFreeCalls))
+		mr.attrGPUMemoryMemset = attributes.OpenTelemetryGetters(
+			mr.attrGetters, mr.attributes.For(attributes.GPUCudaMemoryMemset))
+		mr.attrGPUMemoryPeerCopies = attributes.OpenTelemetryGetters(
+			mr.attrGetters, mr.attributes.For(attributes.GPUCudaMemoryPeerCopies))
+		mr.attrGPUKernelLaunchDur = attributes.OpenTelemetryGetters(
+			mr.attrGetters, mr.attributes.For(attributes.GPUCudaKernelLaunchDuration))
+		mr.attrGPUMemoryAllocCalls = attributes.OpenTelemetryGetters(
+			mr.attrGetters, mr.attributes.For(attributes.GPUCudaMemoryAllocCalls))
+		mr.attrGPUErrors = attributes.OpenTelemetryGetters(
+			mr.attrGetters, mr.attributes.For(attributes.GPUCudaErrors))
 	}
 
 	if is.DNSEnabled() {
@@ -561,6 +601,76 @@ func (mr *MetricsReporter) setupOtelMeters(m *Metrics, meter instrument.Meter) e
 		}
 		m.gpuMemoryCopySize = NewExpirer[*request.Span, instrument.Float64Histogram, float64](
 			m.ctx, gpuMemoryCopySize, mr.attrGPUMemoryCopies, timeNow, mr.cfg.TTL)
+
+		gpuStreamSyncDur, err := meter.Float64Histogram(attributes.GPUCudaStreamSyncDuration.OTEL, instrument.WithUnit("s"))
+		if err != nil {
+			return fmt.Errorf("creating gpu stream sync duration histogram: %w", err)
+		}
+		m.gpuStreamSyncDur = NewExpirer[*request.Span, instrument.Float64Histogram, float64](
+			m.ctx, gpuStreamSyncDur, mr.attrGPUStreamSync, timeNow, mr.cfg.TTL)
+
+		gpuDeviceSyncDur, err := meter.Float64Histogram(attributes.GPUCudaDeviceSyncDuration.OTEL, instrument.WithUnit("s"))
+		if err != nil {
+			return fmt.Errorf("creating gpu device sync duration histogram: %w", err)
+		}
+		m.gpuDeviceSyncDur = NewExpirer[*request.Span, instrument.Float64Histogram, float64](
+			m.ctx, gpuDeviceSyncDur, mr.attrGPUDeviceSync, timeNow, mr.cfg.TTL)
+
+		gpuEventSyncDur, err := meter.Float64Histogram(attributes.GPUCudaEventSyncDuration.OTEL, instrument.WithUnit("s"))
+		if err != nil {
+			return fmt.Errorf("creating gpu event sync duration histogram: %w", err)
+		}
+		m.gpuEventSyncDur = NewExpirer[*request.Span, instrument.Float64Histogram, float64](
+			m.ctx, gpuEventSyncDur, mr.attrGPUEventSync, timeNow, mr.cfg.TTL)
+
+		gpuMemoryFreesTotal, err := meter.Int64Counter(attributes.GPUCudaMemoryFrees.OTEL, instrument.WithUnit("By"))
+		if err != nil {
+			return fmt.Errorf("creating gpu memory frees total counter: %w", err)
+		}
+		m.gpuMemoryFreesTotal = NewExpirer[*request.Span, instrument.Int64Counter, int64](
+			m.ctx, gpuMemoryFreesTotal, mr.attrGPUMemoryFrees, timeNow, mr.cfg.TTL)
+
+		gpuMemoryFreeCalls, err := meter.Int64Counter(attributes.GPUCudaMemoryFreeCalls.OTEL)
+		if err != nil {
+			return fmt.Errorf("creating gpu memory free calls counter: %w", err)
+		}
+		m.gpuMemoryFreeCalls = NewExpirer[*request.Span, instrument.Int64Counter, int64](
+			m.ctx, gpuMemoryFreeCalls, mr.attrGPUMemoryFreeCalls, timeNow, mr.cfg.TTL)
+
+		gpuMemoryMemset, err := meter.Float64Histogram(attributes.GPUCudaMemoryMemset.OTEL, instrument.WithUnit("By"))
+		if err != nil {
+			return fmt.Errorf("creating gpu memset size histogram: %w", err)
+		}
+		m.gpuMemoryMemset = NewExpirer[*request.Span, instrument.Float64Histogram, float64](
+			m.ctx, gpuMemoryMemset, mr.attrGPUMemoryMemset, timeNow, mr.cfg.TTL)
+
+		gpuMemoryPeerCopies, err := meter.Float64Histogram(attributes.GPUCudaMemoryPeerCopies.OTEL, instrument.WithUnit("By"))
+		if err != nil {
+			return fmt.Errorf("creating gpu peer copy size histogram: %w", err)
+		}
+		m.gpuMemoryPeerCopies = NewExpirer[*request.Span, instrument.Float64Histogram, float64](
+			m.ctx, gpuMemoryPeerCopies, mr.attrGPUMemoryPeerCopies, timeNow, mr.cfg.TTL)
+
+		gpuKernelLaunchDur, err := meter.Float64Histogram(attributes.GPUCudaKernelLaunchDuration.OTEL, instrument.WithUnit("s"))
+		if err != nil {
+			return fmt.Errorf("creating gpu kernel launch duration histogram: %w", err)
+		}
+		m.gpuKernelLaunchDur = NewExpirer[*request.Span, instrument.Float64Histogram, float64](
+			m.ctx, gpuKernelLaunchDur, mr.attrGPUKernelLaunchDur, timeNow, mr.cfg.TTL)
+
+		gpuMemoryAllocCalls, err := meter.Int64Counter(attributes.GPUCudaMemoryAllocCalls.OTEL)
+		if err != nil {
+			return fmt.Errorf("creating gpu memory alloc calls counter: %w", err)
+		}
+		m.gpuMemoryAllocCalls = NewExpirer[*request.Span, instrument.Int64Counter, int64](
+			m.ctx, gpuMemoryAllocCalls, mr.attrGPUMemoryAllocCalls, timeNow, mr.cfg.TTL)
+
+		gpuErrors, err := meter.Int64Counter(attributes.GPUCudaErrors.OTEL)
+		if err != nil {
+			return fmt.Errorf("creating gpu errors counter: %w", err)
+		}
+		m.gpuErrors = NewExpirer[*request.Span, instrument.Int64Counter, int64](
+			m.ctx, gpuErrors, mr.attrGPUErrors, timeNow, mr.cfg.TTL)
 	}
 
 	if mr.is.DNSEnabled() {
@@ -983,6 +1093,8 @@ func (r *Metrics) record(span *request.Span, mr *MetricsReporter) {
 			if mr.is.GPUEnabled() {
 				gmem, attrs := r.gpuMemoryAllocsTotal.ForRecord(span)
 				gmem.Add(ctx, span.ContentLength, instrument.WithAttributeSet(attrs))
+				gcalls, attrs := r.gpuMemoryAllocCalls.ForRecord(span)
+				gcalls.Add(ctx, 1, instrument.WithAttributeSet(attrs))
 			}
 		case request.EventTypeGPUCudaGraphLaunch:
 			if mr.is.GPUEnabled() {
@@ -993,6 +1105,50 @@ func (r *Metrics) record(span *request.Span, mr *MetricsReporter) {
 			if mr.is.GPUEnabled() {
 				gmem, attrs := r.gpuMemoryCopySize.ForRecord(span)
 				gmem.Record(r.ctx, float64(span.ContentLength), instrument.WithAttributeSet(attrs))
+			}
+		case request.EventTypeGPUCudaStreamSync:
+			if mr.is.GPUEnabled() {
+				gsync, attrs := r.gpuStreamSyncDur.ForRecord(span)
+				gsync.Record(ctx, duration, instrument.WithAttributeSet(attrs))
+			}
+		case request.EventTypeGPUCudaDeviceSync:
+			if mr.is.GPUEnabled() {
+				gsync, attrs := r.gpuDeviceSyncDur.ForRecord(span)
+				gsync.Record(ctx, duration, instrument.WithAttributeSet(attrs))
+			}
+		case request.EventTypeGPUCudaEventSync:
+			if mr.is.GPUEnabled() {
+				gsync, attrs := r.gpuEventSyncDur.ForRecord(span)
+				gsync.Record(ctx, duration, instrument.WithAttributeSet(attrs))
+			}
+		case request.EventTypeGPUCudaFree:
+			if mr.is.GPUEnabled() {
+				gfree, attrs := r.gpuMemoryFreesTotal.ForRecord(span)
+				if span.ContentLength > 0 {
+					gfree.Add(ctx, span.ContentLength, instrument.WithAttributeSet(attrs))
+				}
+				gcalls, attrs := r.gpuMemoryFreeCalls.ForRecord(span)
+				gcalls.Add(ctx, 1, instrument.WithAttributeSet(attrs))
+			}
+		case request.EventTypeGPUCudaMemset:
+			if mr.is.GPUEnabled() {
+				gmset, attrs := r.gpuMemoryMemset.ForRecord(span)
+				gmset.Record(ctx, float64(span.ContentLength), instrument.WithAttributeSet(attrs))
+			}
+		case request.EventTypeGPUCudaPeerCopy:
+			if mr.is.GPUEnabled() {
+				gpeer, attrs := r.gpuMemoryPeerCopies.ForRecord(span)
+				gpeer.Record(ctx, float64(span.ContentLength), instrument.WithAttributeSet(attrs))
+			}
+		case request.EventTypeGPUCudaKernelLaunchDone:
+			if mr.is.GPUEnabled() {
+				gldur, attrs := r.gpuKernelLaunchDur.ForRecord(span)
+				gldur.Record(ctx, duration, instrument.WithAttributeSet(attrs))
+			}
+		case request.EventTypeGPUCudaError:
+			if mr.is.GPUEnabled() {
+				gerr, attrs := r.gpuErrors.ForRecord(span)
+				gerr.Add(ctx, 1, instrument.WithAttributeSet(attrs))
 			}
 		case request.EventTypeDNS:
 			if mr.is.DNSEnabled() {
@@ -1285,6 +1441,16 @@ func (r *Metrics) cleanupAllMetricsInstances() {
 	cleanupMetrics(r.ctx, r.gpuKernelGridSize)
 	cleanupMetrics(r.ctx, r.gpuKernelBlockSize)
 	cleanupMetrics(r.ctx, r.gpuMemoryCopySize)
+	cleanupMetrics(r.ctx, r.gpuStreamSyncDur)
+	cleanupMetrics(r.ctx, r.gpuDeviceSyncDur)
+	cleanupMetrics(r.ctx, r.gpuEventSyncDur)
+	cleanupCounterMetrics(r.ctx, r.gpuMemoryFreesTotal)
+	cleanupCounterMetrics(r.ctx, r.gpuMemoryFreeCalls)
+	cleanupMetrics(r.ctx, r.gpuMemoryMemset)
+	cleanupMetrics(r.ctx, r.gpuMemoryPeerCopies)
+	cleanupMetrics(r.ctx, r.gpuKernelLaunchDur)
+	cleanupCounterMetrics(r.ctx, r.gpuMemoryAllocCalls)
+	cleanupCounterMetrics(r.ctx, r.gpuErrors)
 	cleanupMetrics(r.ctx, r.dnsLookupDuration)
 	cleanupMetrics(r.ctx, r.genAIClientDuration)
 	cleanupMetrics(r.ctx, r.genAIInputTokenUsage)

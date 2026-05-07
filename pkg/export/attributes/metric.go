@@ -119,6 +119,56 @@ var (
 		Prom:    "gpu_cuda_memory_copies_bytes_total",
 		OTEL:    "gpu.cuda.memory.copies",
 	}
+	GPUCudaStreamSyncDuration = Name{
+		Section: "gpu.cuda.stream.sync.duration",
+		Prom:    "gpu_cuda_stream_sync_duration_seconds",
+		OTEL:    "gpu.cuda.stream.sync.duration",
+	}
+	GPUCudaDeviceSyncDuration = Name{
+		Section: "gpu.cuda.device.sync.duration",
+		Prom:    "gpu_cuda_device_sync_duration_seconds",
+		OTEL:    "gpu.cuda.device.sync.duration",
+	}
+	GPUCudaEventSyncDuration = Name{
+		Section: "gpu.cuda.event.sync.duration",
+		Prom:    "gpu_cuda_event_sync_duration_seconds",
+		OTEL:    "gpu.cuda.event.sync.duration",
+	}
+	GPUCudaMemoryFrees = Name{
+		Section: "gpu.cuda.memory.frees",
+		Prom:    "gpu_cuda_memory_frees_bytes_total",
+		OTEL:    "gpu.cuda.memory.frees",
+	}
+	GPUCudaMemoryFreeCalls = Name{
+		Section: "gpu.cuda.memory.frees.calls",
+		Prom:    "gpu_cuda_memory_frees_calls_total",
+		OTEL:    "gpu.cuda.memory.frees.calls",
+	}
+	GPUCudaMemoryMemset = Name{
+		Section: "gpu.cuda.memory.memset",
+		Prom:    "gpu_cuda_memory_memset_bytes_total",
+		OTEL:    "gpu.cuda.memory.memset",
+	}
+	GPUCudaMemoryPeerCopies = Name{
+		Section: "gpu.cuda.memory.peer.copies",
+		Prom:    "gpu_cuda_memory_peer_copies_bytes_total",
+		OTEL:    "gpu.cuda.memory.peer.copies",
+	}
+	GPUCudaKernelLaunchDuration = Name{
+		Section: "gpu.cuda.kernel.launch.duration",
+		Prom:    "gpu_cuda_kernel_launch_duration_seconds",
+		OTEL:    "gpu.cuda.kernel.launch.duration",
+	}
+	GPUCudaMemoryAllocCalls = Name{
+		Section: "gpu.cuda.memory.allocations.calls",
+		Prom:    "gpu_cuda_memory_allocations_calls_total",
+		OTEL:    "gpu.cuda.memory.allocations.calls",
+	}
+	GPUCudaErrors = Name{
+		Section: "gpu.cuda.errors",
+		Prom:    "gpu_cuda_errors_total",
+		OTEL:    "gpu.cuda.errors",
+	}
 	DNSLookupDuration = Name{
 		Section: "dns.lookup.duration",
 		Prom:    "dns_lookup_duration_seconds",

@@ -298,8 +298,8 @@ func Metadata(val string) attribute.KeyValue {
 	return attribute.Key(attr.GenAIMetadata).String(val)
 }
 
-// These are defined here https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__TYPES.html#group__CUDART__TYPES_1gg18fa99055ee694244a270e4d5101e95bdeec295de8a74ac2a74f98ffb6c5d7c7
-// in the enum cudaMemcpyKind
+// Memcpy direction constants. Values mirror CUDA_MEMCPY_DIR_* in cuda.h.
+// 0 (HostToHost) is never emitted by the Driver API probes (no cuMemcpyHtoH probe).
 const (
 	MemcpyHostToHost     = 0
 	MemcpyHostToDevice   = 1
@@ -324,6 +324,61 @@ func CudaMemcpyName(val int) string {
 
 func CudaMemcpy(val int) attribute.KeyValue {
 	return attribute.Key(attr.CudaMemcpyKind).String(CudaMemcpyName(val))
+}
+
+func CudaMemKindName(val int) string {
+	switch val {
+	case 1:
+		return "device"
+	case 2:
+		return "host"
+	case 3:
+		return "managed"
+	case 4:
+		return "pool"
+	default:
+		return "unknown"
+	}
+}
+
+func CudaMemKind(val int) attribute.KeyValue {
+	return attribute.Key(attr.CudaMemoryKind).String(CudaMemKindName(val))
+}
+
+// CudaFuncName maps a CUDA_FUNC_* constant to the Driver API function name.
+func CudaFuncName(val int) string {
+	switch val {
+	case 1:
+		return "cuLaunchKernel"
+	case 2:
+		return "cuLaunchCooperativeKernel"
+	case 3:
+		return "cuMemAlloc_v2"
+	case 4:
+		return "cuMemAllocManaged"
+	case 5:
+		return "cuMemAllocHost_v2"
+	case 6:
+		return "cuMemHostAlloc"
+	case 7:
+		return "cuMemAllocAsync"
+	case 8:
+		return "cuStreamSynchronize"
+	case 9:
+		return "cuCtxSynchronize"
+	case 10:
+		return "cuEventSynchronize"
+	default:
+		return "unknown"
+	}
+}
+
+func CudaFunction(val int) attribute.KeyValue {
+	return attribute.Key(attr.CudaFunction).String(CudaFuncName(val))
+}
+
+func CudaErrorCode(val int) attribute.KeyValue {
+	return attribute.Key(attr.CudaErrorCode).Int(val)
 }
 
 func Job(val string) attribute.KeyValue {

@@ -4,8 +4,6 @@
 package goexec // import "go.opentelemetry.io/obi/pkg/internal/goexec"
 
 import (
-	"fmt"
-
 	"golang.org/x/arch/x86/x86asm"
 )
 
@@ -35,7 +33,11 @@ func FindReturnOffsets(baseOffset uint64, data []byte) ([]uint64, error) {
 
 		instruction, err := x86asm.Decode(data[index:], 64)
 		if err != nil {
-			return nil, fmt.Errorf("failed to decode x64 instruction at offset %d: %w", index, err)
+			// Skip undecodable bytes (e.g. multi-prefix NOP padding in non-Go
+			// shared libraries like libcuda.so) rather than aborting and losing
+			// all RET offsets found so far.
+			index++
+			continue
 		}
 
 		if instruction.Op == x86asm.RET {
