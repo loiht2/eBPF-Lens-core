@@ -56,6 +56,8 @@ const (
 	EventTypeGPUCudaPeerCopy
 	EventTypeGPUCudaKernelLaunchDone
 	EventTypeGPUCudaError
+	EventTypeGPUHamiOOM
+	EventTypeGPUHamiThrottle
 	EventTypeFailedConnect
 	EventTypeDNS
 	EventTypeCouchbaseClient
@@ -167,6 +169,10 @@ func (t EventType) String() string {
 		return "CUDALaunchKernelDone"
 	case EventTypeGPUCudaError:
 		return "CUDAError"
+	case EventTypeGPUHamiOOM:
+		return "HAMiOOM"
+	case EventTypeGPUHamiThrottle:
+		return "HAMiThrottle"
 	case EventTypeMongoClient:
 		return "MongoClient"
 	case EventTypeManualSpan:
@@ -887,6 +893,14 @@ func spanAttributes(s *Span) SpanAttributes {
 			"function":   CudaFuncName(int(s.ContentLength)),
 			"error_code": strconv.Itoa(s.SubType),
 		}
+	case EventTypeGPUHamiOOM:
+		return SpanAttributes{
+			"function":   CudaFuncName(int(s.ContentLength)),
+			"mem_kind":   CudaMemKindName(s.SubType >> 24),
+			"error_code": strconv.Itoa(s.SubType & 0xFFFFFF),
+		}
+	case EventTypeGPUHamiThrottle:
+		return SpanAttributes{}
 	case EventTypeMongoClient:
 		return SpanAttributes{
 			"serverAddr": SpanHost(s),

@@ -25,7 +25,7 @@ import (
 	"go.opentelemetry.io/obi/pkg/pipe/msg"
 )
 
-//go:generate $BPF2GO -cc $BPF_CLANG -cflags $BPF_CFLAGS -type cuda_kernel_launch_t -type cuda_graph_launch_t -type cuda_malloc_t -type cuda_memcpy_t -type cuda_sync_t -type cuda_free_t -type cuda_memset_t -type cuda_peer_copy_t -type cuda_kernel_launch_done_t -type cuda_error_t -target amd64,arm64 Bpf ../../../../bpf/gpuevent/gpuevent.c -- -I../../../../bpf
+//go:generate $BPF2GO -cc $BPF_CLANG -cflags $BPF_CFLAGS -type cuda_kernel_launch_t -type cuda_graph_launch_t -type cuda_malloc_t -type cuda_memcpy_t -type cuda_sync_t -type cuda_free_t -type cuda_memset_t -type cuda_peer_copy_t -type cuda_kernel_launch_done_t -type cuda_error_t -type hami_oom_t -type hami_throttle_t -target amd64,arm64 Bpf ../../../../bpf/gpuevent/gpuevent.c -- -I../../../../bpf
 
 const (
 	EventTypeKernelLaunch     = 1  // EVENT_CUDA_KERNEL_LAUNCH
@@ -38,6 +38,8 @@ const (
 	EventTypeMemset           = 8  // EVENT_CUDA_MEMSET
 	EventTypePeerCopy         = 9  // EVENT_CUDA_PEER_COPY
 	EventTypeError            = 10 // EVENT_CUDA_ERROR
+	EventTypeHamiOOM          = 11 // EVENT_HAMI_OOM
+	EventTypeHamiThrottle     = 12 // EVENT_HAMI_THROTTLE
 
 	// Memory kind constants (mirror C #defines)
 	MemKindDevice  = 1
@@ -79,6 +81,8 @@ type (
 	GPUCudaPeerCopyInfo         BpfCudaPeerCopyT
 	GPUCudaKernelLaunchDoneInfo BpfCudaKernelLaunchDoneT
 	GPUCudaErrorInfo            BpfCudaErrorT
+	GPUHamiOOMInfo              BpfHamiOomT
+	GPUHamiThrottleInfo         BpfHamiThrottleT
 )
 
 // TODO: We have a way to bring ELF file information to this Tracer struct
@@ -167,6 +171,37 @@ func (p *Tracer) Tracepoints() map[string]ebpfcommon.ProbeDesc {
 
 func (p *Tracer) UProbes() map[string]map[string][]*ebpfcommon.ProbeDesc {
 	return map[string]map[string][]*ebpfcommon.ProbeDesc{
+		// libvgpu.so probes — only-HAMi mode. Required:false so MIG clusters are unaffected.
+		"libvgpu.so": {
+			"cuLaunchKernel": {{
+				Start:    p.bpfObjects.ObiHamiCuLaunch,
+				Required: false,
+			}},
+			"cuLaunchCooperativeKernel": {{
+				Start:    p.bpfObjects.ObiHamiCuCoopLaunch,
+				Required: false,
+			}},
+			"cuMemAlloc_v2": {{
+				End:      p.bpfObjects.ObiHamiCuMemAllocExit,
+				Required: false,
+			}},
+			"cuMemAllocManaged": {{
+				End:      p.bpfObjects.ObiHamiCuMemAllocManagedExit,
+				Required: false,
+			}},
+			"cuMemAllocHost_v2": {{
+				End:      p.bpfObjects.ObiHamiCuMemAllocHostExit,
+				Required: false,
+			}},
+			"cuMemHostAlloc": {{
+				End:      p.bpfObjects.ObiHamiCuMemHostAllocExit,
+				Required: false,
+			}},
+			"cuMemAllocAsync": {{
+				End:      p.bpfObjects.ObiHamiCuMemAllocAsyncExit,
+				Required: false,
+			}},
+		},
 		"libcuda.so": {
 			// Kernel launches (entry emits grid/block info; exit emits duration)
 			"cuLaunchKernel": {{
@@ -344,6 +379,10 @@ func (p *Tracer) processCudaEvent(record *ringbuf.Record) (request.Span, bool, e
 		return p.readGPUKernelLaunchDoneIntoSpan(record)
 	case EventTypeError:
 		return p.readGPUErrorIntoSpan(record)
+	case EventTypeHamiOOM:
+		return p.readGPUHamiOOMIntoSpan(record)
+	case EventTypeHamiThrottle:
+		return p.readGPUHamiThrottleIntoSpan(record)
 	default:
 		p.log.Error("unknown cuda event", "type", eventType)
 	}
@@ -567,6 +606,57 @@ func (p *Tracer) readGPUErrorIntoSpan(record *ringbuf.Record) (request.Span, boo
 		Type:          request.EventTypeGPUCudaError,
 		SubType:       int(event.ErrorCode), // cudaError_t value
 		ContentLength: int64(event.FuncId),  // CUDA_FUNC_* identifier → mapped to function name
+		Pid: request.PidInfo{
+			HostPID:   app.PID(event.PidInfo.HostPid),
+			UserPID:   app.PID(event.PidInfo.UserPid),
+			Namespace: event.PidInfo.Ns,
+		},
+	}, false, nil
+}
+
+// readGPUHamiOOMIntoSpan decodes a HAMi quota-OOM event from libvgpu.so.
+// SubType packs both mem_kind and rc: (int(mem_kind) << 24) | int(rc).
+// ContentLength carries the CUDA_FUNC_* identifier.
+func (p *Tracer) readGPUHamiOOMIntoSpan(record *ringbuf.Record) (request.Span, bool, error) {
+	event, err := ebpfcommon.ReinterpretCast[GPUHamiOOMInfo](record.RawSample)
+	if err != nil {
+		return request.Span{}, true, err
+	}
+
+	p.log.Debug("HAMi OOM", "func_id", event.CudaFuncId, "mem_kind", event.MemKind, "rc", event.Rc)
+
+	return request.Span{
+		Type:          request.EventTypeGPUHamiOOM,
+		SubType:       (int(event.MemKind) << 24) | int(event.Rc),
+		ContentLength: int64(event.CudaFuncId),
+		Pid: request.PidInfo{
+			HostPID:   app.PID(event.PidInfo.HostPid),
+			UserPID:   app.PID(event.PidInfo.UserPid),
+			Namespace: event.PidInfo.Ns,
+		},
+	}, false, nil
+}
+
+// readGPUHamiThrottleIntoSpan decodes a HAMi compute-throttle event.
+// RequestStart and End are set so that End-RequestStart == duration_ns.
+func (p *Tracer) readGPUHamiThrottleIntoSpan(record *ringbuf.Record) (request.Span, bool, error) {
+	event, err := ebpfcommon.ReinterpretCast[GPUHamiThrottleInfo](record.RawSample)
+	if err != nil {
+		return request.Span{}, true, err
+	}
+
+	p.log.Debug("HAMi Throttle", "duration_ns", event.DurationNs)
+
+	monoNow := int64(monotime.Now())
+	// BPF measures duration from libvgpu entry to libcuda entry (both ktime).
+	// We don't have entry_ts, so anchor End to now.
+	end := monoNow
+	start := end - int64(event.DurationNs)
+
+	return request.Span{
+		Type:         request.EventTypeGPUHamiThrottle,
+		RequestStart: start,
+		End:          end,
 		Pid: request.PidInfo{
 			HostPID:   app.PID(event.PidInfo.HostPid),
 			UserPID:   app.PID(event.PidInfo.UserPid),

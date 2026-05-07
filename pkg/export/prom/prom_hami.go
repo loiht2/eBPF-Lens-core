@@ -12,7 +12,7 @@ import (
 	"go.opentelemetry.io/obi/pkg/internal/hami"
 )
 
-// hamiGauges holds all HAMi Prometheus GaugeVecs registered by newHamiGauges.
+// hamiGauges holds all HAMi Prometheus metrics registered by newHamiGauges.
 type hamiGauges struct {
 	// Per-container, per-device quota limits set by HAMi at pod start.
 	quotaMemLimitBytes *prometheus.GaugeVec
@@ -28,6 +28,7 @@ type hamiGauges struct {
 	procEncUtilPct      *prometheus.GaugeVec
 	procDecUtilPct      *prometheus.GaugeVec
 	procStatus          *prometheus.GaugeVec
+
 }
 
 var quotaLabels = []string{"pod_uid", "container_name", "device_id", "gpu_uuid"}

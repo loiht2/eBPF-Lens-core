@@ -30,6 +30,8 @@ const cuda_memset_t             *unused_gpu6 __attribute__((unused));
 const cuda_peer_copy_t          *unused_gpu7 __attribute__((unused));
 const cuda_kernel_launch_done_t *unused_gpu8 __attribute__((unused));
 const cuda_error_t              *unused_gpu9 __attribute__((unused));
+const hami_oom_t                *unused_gpu10 __attribute__((unused));
+const hami_throttle_t           *unused_gpu11 __attribute__((unused));
 
 enum {
     k_event_kernel_launch      = 1,
@@ -42,6 +44,8 @@ enum {
     k_event_memset             = 8,
     k_event_peer_copy          = 9,
     k_event_error              = 10,
+    k_event_hami_oom           = 11,
+    k_event_hami_throttle      = 12,
 };
 
 // ──────────────────────────── BPF maps ────────────────────────────
@@ -77,6 +81,16 @@ struct {
     __type(key,   u64);
     __type(value, u64);
 } gpu_launch_start SEC(".maps");
+
+// Maps pid_tgid → libvgpu.so:cuLaunchKernel entry timestamp (only-HAMi mode).
+// Written by hami.c entry probes; read+deleted in cu_launch_entry_impl to compute
+// HAMi rate_limiter stall duration. Always empty in only-MIG mode (libvgpu absent).
+struct {
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 65536);
+    __type(key,   u64);
+    __type(value, u64);
+} hami_launch_entry SEC(".maps");
 
 // ──────────────────────── Shared helpers ──────────────────────────
 
@@ -277,6 +291,20 @@ static __always_inline int cu_launch_entry_impl(struct pt_regs *ctx, u64 func_ha
 
     u64 ts = bpf_ktime_get_ns();
     bpf_map_update_elem(&gpu_launch_start, &id, &ts, BPF_ANY);
+
+    // HAMi throttle detection (only-HAMi mode): if libvgpu.so recorded a launch
+    // entry timestamp, the delta is the time HAMi's rate_limiter() spent stalling.
+    u64 *hami_t0 = bpf_map_lookup_elem(&hami_launch_entry, &id);
+    if (hami_t0) {
+        hami_throttle_t *te = bpf_ringbuf_reserve(&gpu_events, sizeof(*te), 0);
+        if (te) {
+            te->flags       = k_event_hami_throttle;
+            task_pid(&te->pid_info);
+            te->duration_ns = ts - *hami_t0;
+            bpf_ringbuf_submit(te, 0);
+        }
+        bpf_map_delete_elem(&hami_launch_entry, &id);
+    }
 
     cuda_kernel_launch_t *e = bpf_ringbuf_reserve(&gpu_events, sizeof(*e), 0);
     if (!e) {

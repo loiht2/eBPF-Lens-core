@@ -112,6 +112,8 @@ type MetricsReporter struct {
 	attrGPUKernelLaunchDur     []attributes.Field[*request.Span, attribute.KeyValue]
 	attrGPUMemoryAllocCalls    []attributes.Field[*request.Span, attribute.KeyValue]
 	attrGPUErrors              []attributes.Field[*request.Span, attribute.KeyValue]
+	attrHamiOOMEvents          []attributes.Field[*request.Span, attribute.KeyValue]
+	attrHamiThrottleDuration   []attributes.Field[*request.Span, attribute.KeyValue]
 	attrDNSLookupDuration      []attributes.Field[*request.Span, attribute.KeyValue]
 	attrGenAIInputTokenUsage   []attributes.Field[*request.Span, attribute.KeyValue]
 	attrGenAIOutputTokenUsage  []attributes.Field[*request.Span, attribute.KeyValue]
@@ -169,6 +171,8 @@ type Metrics struct {
 	gpuKernelLaunchDur   *Expirer[*request.Span, instrument.Float64Histogram, float64]
 	gpuMemoryAllocCalls  *Expirer[*request.Span, instrument.Int64Counter, int64]
 	gpuErrors            *Expirer[*request.Span, instrument.Int64Counter, int64]
+	hamiOOMEvents        *Expirer[*request.Span, instrument.Int64Counter, int64]
+	hamiThrottleDuration *Expirer[*request.Span, instrument.Float64Histogram, float64]
 	// dns
 	dnsLookupDuration *Expirer[*request.Span, instrument.Float64Histogram, float64]
 	// genai
@@ -325,6 +329,10 @@ func newMetricsReporter(
 			mr.attrGetters, mr.attributes.For(attributes.GPUCudaMemoryAllocCalls))
 		mr.attrGPUErrors = attributes.OpenTelemetryGetters(
 			mr.attrGetters, mr.attributes.For(attributes.GPUCudaErrors))
+		mr.attrHamiOOMEvents = attributes.OpenTelemetryGetters(
+			mr.attrGetters, mr.attributes.For(attributes.GPUHamiOOMEvents))
+		mr.attrHamiThrottleDuration = attributes.OpenTelemetryGetters(
+			mr.attrGetters, mr.attributes.For(attributes.GPUHamiThrottleDuration))
 	}
 
 	if is.DNSEnabled() {
@@ -671,6 +679,20 @@ func (mr *MetricsReporter) setupOtelMeters(m *Metrics, meter instrument.Meter) e
 		}
 		m.gpuErrors = NewExpirer[*request.Span, instrument.Int64Counter, int64](
 			m.ctx, gpuErrors, mr.attrGPUErrors, timeNow, mr.cfg.TTL)
+
+		hamiOOMEvents, err := meter.Int64Counter(attributes.GPUHamiOOMEvents.OTEL)
+		if err != nil {
+			return fmt.Errorf("creating hami oom events counter: %w", err)
+		}
+		m.hamiOOMEvents = NewExpirer[*request.Span, instrument.Int64Counter, int64](
+			m.ctx, hamiOOMEvents, mr.attrHamiOOMEvents, timeNow, mr.cfg.TTL)
+
+		hamiThrottleDur, err := meter.Float64Histogram(attributes.GPUHamiThrottleDuration.OTEL, instrument.WithUnit("s"))
+		if err != nil {
+			return fmt.Errorf("creating hami throttle duration histogram: %w", err)
+		}
+		m.hamiThrottleDuration = NewExpirer[*request.Span, instrument.Float64Histogram, float64](
+			m.ctx, hamiThrottleDur, mr.attrHamiThrottleDuration, timeNow, mr.cfg.TTL)
 	}
 
 	if mr.is.DNSEnabled() {
@@ -1150,6 +1172,16 @@ func (r *Metrics) record(span *request.Span, mr *MetricsReporter) {
 				gerr, attrs := r.gpuErrors.ForRecord(span)
 				gerr.Add(ctx, 1, instrument.WithAttributeSet(attrs))
 			}
+		case request.EventTypeGPUHamiOOM:
+			if mr.is.GPUEnabled() {
+				hoom, attrs := r.hamiOOMEvents.ForRecord(span)
+				hoom.Add(ctx, 1, instrument.WithAttributeSet(attrs))
+			}
+		case request.EventTypeGPUHamiThrottle:
+			if mr.is.GPUEnabled() {
+				hthr, attrs := r.hamiThrottleDuration.ForRecord(span)
+				hthr.Record(ctx, duration, instrument.WithAttributeSet(attrs))
+			}
 		case request.EventTypeDNS:
 			if mr.is.DNSEnabled() {
 				dnsDuration, attrs := r.dnsLookupDuration.ForRecord(span)
@@ -1451,6 +1483,8 @@ func (r *Metrics) cleanupAllMetricsInstances() {
 	cleanupMetrics(r.ctx, r.gpuKernelLaunchDur)
 	cleanupCounterMetrics(r.ctx, r.gpuMemoryAllocCalls)
 	cleanupCounterMetrics(r.ctx, r.gpuErrors)
+	cleanupCounterMetrics(r.ctx, r.hamiOOMEvents)
+	cleanupMetrics(r.ctx, r.hamiThrottleDuration)
 	cleanupMetrics(r.ctx, r.dnsLookupDuration)
 	cleanupMetrics(r.ctx, r.genAIClientDuration)
 	cleanupMetrics(r.ctx, r.genAIInputTokenUsage)

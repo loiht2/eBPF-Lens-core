@@ -169,6 +169,16 @@ var (
 		Prom:    "gpu_cuda_errors_total",
 		OTEL:    "gpu.cuda.errors",
 	}
+	GPUHamiOOMEvents = Name{
+		Section: "gpu.hami.oom.events",
+		Prom:    "gpu_hami_oom_events_total",
+		OTEL:    "gpu.hami.oom.events",
+	}
+	GPUHamiThrottleDuration = Name{
+		Section: "gpu.hami.compute.throttle.duration",
+		Prom:    "gpu_hami_compute_throttle_duration_seconds",
+		OTEL:    "gpu.hami.compute.throttle.duration",
+	}
 	DNSLookupDuration = Name{
 		Section: "dns.lookup.duration",
 		Prom:    "dns_lookup_duration_seconds",

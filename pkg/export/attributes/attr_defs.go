@@ -464,6 +464,18 @@ func getDefinitions(
 				attr.CudaErrorCode: true,
 			},
 		},
+		GPUHamiOOMEvents.Section: {
+			SubGroups: []*AttrReportGroup{&appAttributes},
+			Attributes: map[attr.Name]Default{
+				attr.CudaFunction:      true,
+				attr.HamiOOMMemKind:    true,
+				attr.HamiOOMErrorCode:  true,
+			},
+		},
+		GPUHamiThrottleDuration.Section: {
+			SubGroups:  []*AttrReportGroup{&appAttributes},
+			Attributes: map[attr.Name]Default{},
+		},
 		DNSLookupDuration.Section: {
 			SubGroups: []*AttrReportGroup{&appAttributes},
 			Attributes: map[attr.Name]Default{

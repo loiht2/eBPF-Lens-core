@@ -225,6 +225,8 @@ type metricsReporter struct {
 	attrCudaKernelLaunchDur    []attributes.Field[*request.Span, string]
 	attrCudaMemoryAllocCalls   []attributes.Field[*request.Span, string]
 	attrCudaErrors             []attributes.Field[*request.Span, string]
+	attrHamiOOMEvents          []attributes.Field[*request.Span, string]
+	attrHamiThrottleDuration   []attributes.Field[*request.Span, string]
 	attrSvcGraph               []attributes.Field[*request.Span, string]
 	attrDNSLookupDuration      []attributes.Field[*request.Span, string]
 	attrGenAIClientDuration    []attributes.Field[*request.Span, string]
@@ -262,6 +264,8 @@ type metricsReporter struct {
 	cudaKernelLaunchDur   *Expirer[prometheus.Histogram]
 	cudaMemoryAllocCalls  *Expirer[prometheus.Counter]
 	cudaErrors            *Expirer[prometheus.Counter]
+	hamiOOMEvents         *Expirer[prometheus.Counter]
+	hamiThrottleDuration  *Expirer[prometheus.Histogram]
 
 	// dns related metrics
 	dnsLookupDuration *Expirer[prometheus.Histogram]
@@ -450,6 +454,15 @@ func newReporter(
 			attrsProvider.For(attributes.GPUCudaErrors))
 	}
 
+	var attrHamiOOMEvents, attrHamiThrottleDuration []attributes.Field[*request.Span, string]
+
+	if is.GPUEnabled() {
+		attrHamiOOMEvents = attributes.PrometheusGetters(attributeGetters,
+			attrsProvider.For(attributes.GPUHamiOOMEvents))
+		attrHamiThrottleDuration = attributes.PrometheusGetters(attributeGetters,
+			attrsProvider.For(attributes.GPUHamiThrottleDuration))
+	}
+
 	var attrDNSLookupDuration []attributes.Field[*request.Span, string]
 
 	if is.DNSEnabled() {
@@ -530,6 +543,8 @@ func newReporter(
 		attrCudaKernelLaunchDur:    attrCudaKernelLaunchDur,
 		attrCudaMemoryAllocCalls:   attrCudaMemoryAllocCalls,
 		attrCudaErrors:             attrCudaErrors,
+		attrHamiOOMEvents:          attrHamiOOMEvents,
+		attrHamiThrottleDuration:   attrHamiThrottleDuration,
 		attrDNSLookupDuration:      attrDNSLookupDuration,
 		attrGenAIClientDuration:    attrGenAIClientDuration,
 		attrGenAIInputTokenUsage:   attrGenAIInputTokenUsage,
@@ -865,6 +880,22 @@ func newReporter(
 				Name: attributes.GPUCudaErrors.Prom,
 				Help: "number of NVIDIA GPU cuda API errors",
 			}, labelNames(attrCudaErrors)).MetricVec, clock.Time, cfg.TTL)
+		}),
+		hamiOOMEvents: optionalCounterProvider(is.GPUEnabled(), func() *Expirer[prometheus.Counter] {
+			return NewExpirer[prometheus.Counter](prometheus.NewCounterVec(prometheus.CounterOpts{
+				Name: attributes.GPUHamiOOMEvents.Prom,
+				Help: "number of HAMi quota-denied allocation events (only-HAMi mode)",
+			}, labelNames(attrHamiOOMEvents)).MetricVec, clock.Time, cfg.TTL)
+		}),
+		hamiThrottleDuration: optionalHistogramProvider(is.GPUEnabled(), func() *Expirer[prometheus.Histogram] {
+			return NewExpirer[prometheus.Histogram](prometheus.NewHistogramVec(prometheus.HistogramOpts{
+				Name:                            attributes.GPUHamiThrottleDuration.Prom,
+				Help:                            "duration of HAMi rate_limiter stalls before kernel launch reaches libcuda.so",
+				Buckets:                         cfg.Buckets.DurationHistogram,
+				NativeHistogramBucketFactor:     defaultHistogramBucketFactor,
+				NativeHistogramMaxBucketNumber:  defaultHistogramMaxBucketNumber,
+				NativeHistogramMinResetDuration: defaultHistogramMinResetDuration,
+			}, labelNames(attrHamiThrottleDuration)).MetricVec, clock.Time, cfg.TTL)
 		}),
 		dnsLookupDuration: optionalHistogramProvider(is.DNSEnabled(), func() *Expirer[prometheus.Histogram] {
 			return NewExpirer[prometheus.Histogram](prometheus.NewHistogramVec(prometheus.HistogramOpts{
@@ -1276,6 +1307,14 @@ func (r *metricsReporter) observe(span *request.Span) {
 		case request.EventTypeGPUCudaError:
 			if r.is.GPUEnabled() {
 				r.addCounter(r.cudaErrors.WithLabelValues(labelValues(span, r.attrCudaErrors)...).Metric, 1, span)
+			}
+		case request.EventTypeGPUHamiOOM:
+			if r.is.GPUEnabled() {
+				r.addCounter(r.hamiOOMEvents.WithLabelValues(labelValues(span, r.attrHamiOOMEvents)...).Metric, 1, span)
+			}
+		case request.EventTypeGPUHamiThrottle:
+			if r.is.GPUEnabled() {
+				r.observeHistogram(r.hamiThrottleDuration.WithLabelValues(labelValues(span, r.attrHamiThrottleDuration)...).Metric, duration, span)
 			}
 		case request.EventTypeDNS:
 			if r.is.DNSEnabled() {

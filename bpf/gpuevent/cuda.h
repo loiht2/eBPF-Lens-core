@@ -151,3 +151,25 @@ typedef struct cuda_ongoing_alloc {
     u8  mem_kind;
     u8  _pad[7];
 } cuda_ongoing_alloc_t;
+
+// HAMi OOM event — emitted by uretprobe on libvgpu.so:cuMemAlloc_v2 when rc != 0
+// (HAMi quota-denied allocation; never reaches libcuda.so)
+typedef struct hami_oom {
+    u8  flags;       // k_event_hami_oom = 11
+    u8  cuda_func_id; // CUDA_FUNC_* identifier
+    u8  mem_kind;    // CUDA_MEM_KIND_* (always DEVICE for cuMemAlloc_v2)
+    u8  _pad0;
+    s32 rc;          // CUresult error code (CUDA_ERROR_OUT_OF_MEMORY = 2)
+    u8  _pad1[4];
+    pid_info pid_info;
+} hami_oom_t;
+
+// HAMi compute-throttle event — emitted in libcuda.so:cuLaunchKernel entry probe
+// when a matching libvgpu.so entry timestamp exists, indicating the HAMi rate_limiter stalled.
+// Layout: flags(1) + _pad0[3](3) = 4 bytes; pid_info(12) ends at 16; duration_ns(8) at 16.
+typedef struct hami_throttle {
+    u8  flags;       // k_event_hami_throttle = 12
+    u8  _pad0[3];
+    pid_info pid_info;
+    u64 duration_ns; // stall time = libcuda_entry_ts - libvgpu_entry_ts
+} hami_throttle_t;

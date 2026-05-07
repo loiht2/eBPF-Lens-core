@@ -3,5 +3,6 @@
 
 //go:build obi_bpf_ignore
 #include "cuda.c"
+#include "hami.c"
 
 char __license[] SEC("license") = "Dual MIT/GPL";

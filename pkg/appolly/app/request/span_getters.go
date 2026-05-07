@@ -263,6 +263,14 @@ func spanOTELGetters(name attr.Name) (attributes.Getter[*Span, attribute.KeyValu
 		getter = func(span *Span) attribute.KeyValue { return CudaFunction(int(span.ContentLength)) }
 	case attr.CudaErrorCode:
 		getter = func(span *Span) attribute.KeyValue { return CudaErrorCode(span.SubType) }
+	case attr.HamiOOMMemKind:
+		getter = func(span *Span) attribute.KeyValue {
+			return attribute.Key(attr.HamiOOMMemKind).String(CudaMemKindName(span.SubType >> 24))
+		}
+	case attr.HamiOOMErrorCode:
+		getter = func(span *Span) attribute.KeyValue {
+			return attribute.Key(attr.HamiOOMErrorCode).Int(span.SubType & 0xFFFFFF)
+		}
 	case attr.Job:
 		getter = func(span *Span) attribute.KeyValue { return Job(span.Service.Job()) }
 	case attr.Instance:
