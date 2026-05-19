@@ -100,6 +100,8 @@ type MetricsReporter struct {
 	attrGPUGraphCalls          []attributes.Field[*request.Span, attribute.KeyValue]
 	attrGPUKernelGridSize      []attributes.Field[*request.Span, attribute.KeyValue]
 	attrGPUKernelBlockSize     []attributes.Field[*request.Span, attribute.KeyValue]
+	attrGPUKernelSharedMem     []attributes.Field[*request.Span, attribute.KeyValue]
+	attrGPUEventElapsed        []attributes.Field[*request.Span, attribute.KeyValue]
 	attrGPUMemoryAllocations   []attributes.Field[*request.Span, attribute.KeyValue]
 	attrGPUMemoryCopies        []attributes.Field[*request.Span, attribute.KeyValue]
 	attrGPUStreamSync          []attributes.Field[*request.Span, attribute.KeyValue]
@@ -160,6 +162,8 @@ type Metrics struct {
 	gpuMemoryAllocsTotal *Expirer[*request.Span, instrument.Int64Counter, int64]
 	gpuKernelGridSize    *Expirer[*request.Span, instrument.Float64Histogram, float64]
 	gpuKernelBlockSize   *Expirer[*request.Span, instrument.Float64Histogram, float64]
+	gpuKernelSharedMem   *Expirer[*request.Span, instrument.Float64Histogram, float64]
+	gpuEventElapsedDur   *Expirer[*request.Span, instrument.Float64Histogram, float64]
 	gpuMemoryCopySize    *Expirer[*request.Span, instrument.Float64Histogram, float64]
 	gpuStreamSyncDur     *Expirer[*request.Span, instrument.Float64Histogram, float64]
 	gpuDeviceSyncDur     *Expirer[*request.Span, instrument.Float64Histogram, float64]
@@ -307,6 +311,10 @@ func newMetricsReporter(
 			mr.attrGetters, mr.attributes.For(attributes.GPUCudaKernelGridSize))
 		mr.attrGPUKernelBlockSize = attributes.OpenTelemetryGetters(
 			mr.attrGetters, mr.attributes.For(attributes.GPUCudaKernelBlockSize))
+		mr.attrGPUKernelSharedMem = attributes.OpenTelemetryGetters(
+			mr.attrGetters, mr.attributes.For(attributes.GPUCudaKernelSharedMemoryBytes))
+		mr.attrGPUEventElapsed = attributes.OpenTelemetryGetters(
+			mr.attrGetters, mr.attributes.For(attributes.GPUCudaEventElapsedDuration))
 		mr.attrGPUMemoryCopies = attributes.OpenTelemetryGetters(
 			mr.attrGetters, mr.attributes.For(attributes.GPUCudaMemoryCopies))
 		mr.attrGPUStreamSync = attributes.OpenTelemetryGetters(
@@ -602,6 +610,20 @@ func (mr *MetricsReporter) setupOtelMeters(m *Metrics, meter instrument.Meter) e
 		}
 		m.gpuKernelBlockSize = NewExpirer[*request.Span, instrument.Float64Histogram, float64](
 			m.ctx, gpuKernelBlockSize, mr.attrGPUKernelBlockSize, timeNow, mr.cfg.TTL)
+
+		gpuKernelSharedMem, err := meter.Float64Histogram(attributes.GPUCudaKernelSharedMemoryBytes.OTEL, instrument.WithUnit("By"))
+		if err != nil {
+			return fmt.Errorf("creating gpu kernel shared memory histogram: %w", err)
+		}
+		m.gpuKernelSharedMem = NewExpirer[*request.Span, instrument.Float64Histogram, float64](
+			m.ctx, gpuKernelSharedMem, mr.attrGPUKernelSharedMem, timeNow, mr.cfg.TTL)
+
+		gpuEventElapsedDur, err := meter.Float64Histogram(attributes.GPUCudaEventElapsedDuration.OTEL, instrument.WithUnit("s"))
+		if err != nil {
+			return fmt.Errorf("creating gpu event elapsed duration histogram: %w", err)
+		}
+		m.gpuEventElapsedDur = NewExpirer[*request.Span, instrument.Float64Histogram, float64](
+			m.ctx, gpuEventElapsedDur, mr.attrGPUEventElapsed, timeNow, mr.cfg.TTL)
 
 		gpuMemoryCopySize, err := meter.Float64Histogram(attributes.GPUCudaMemoryCopies.OTEL, instrument.WithUnit("1"))
 		if err != nil {
@@ -1110,6 +1132,9 @@ func (r *Metrics) record(span *request.Span, mr *MetricsReporter) {
 
 				gblock, attrs := r.gpuKernelBlockSize.ForRecord(span)
 				gblock.Record(ctx, float64(span.SubType), instrument.WithAttributeSet(attrs))
+
+				gshmem, attrs := r.gpuKernelSharedMem.ForRecord(span)
+				gshmem.Record(ctx, float64(span.GPUSharedMemBytes), instrument.WithAttributeSet(attrs))
 			}
 		case request.EventTypeGPUCudaMalloc:
 			if mr.is.GPUEnabled() {
@@ -1181,6 +1206,11 @@ func (r *Metrics) record(span *request.Span, mr *MetricsReporter) {
 			if mr.is.GPUEnabled() {
 				hthr, attrs := r.hamiThrottleDuration.ForRecord(span)
 				hthr.Record(ctx, duration, instrument.WithAttributeSet(attrs))
+			}
+		case request.EventTypeGPUCudaEventElapsed:
+			if mr.is.GPUEnabled() {
+				ee, attrs := r.gpuEventElapsedDur.ForRecord(span)
+				ee.Record(ctx, duration, instrument.WithAttributeSet(attrs))
 			}
 		case request.EventTypeDNS:
 			if mr.is.DNSEnabled() {
@@ -1472,6 +1502,8 @@ func (r *Metrics) cleanupAllMetricsInstances() {
 	cleanupCounterMetrics(r.ctx, r.gpuMemoryAllocsTotal)
 	cleanupMetrics(r.ctx, r.gpuKernelGridSize)
 	cleanupMetrics(r.ctx, r.gpuKernelBlockSize)
+	cleanupMetrics(r.ctx, r.gpuKernelSharedMem)
+	cleanupMetrics(r.ctx, r.gpuEventElapsedDur)
 	cleanupMetrics(r.ctx, r.gpuMemoryCopySize)
 	cleanupMetrics(r.ctx, r.gpuStreamSyncDur)
 	cleanupMetrics(r.ctx, r.gpuDeviceSyncDur)

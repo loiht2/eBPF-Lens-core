@@ -368,6 +368,39 @@ func CudaFuncName(val int) string {
 		return "cuCtxSynchronize"
 	case 10:
 		return "cuEventSynchronize"
+	case 11:
+		return "cuMemAllocFromPoolAsync"
+	case 12:
+		return "cuMemHostRegister"
+	case 13:
+		return "cuMemHostUnregister"
+	case 14:
+		return "cuEventElapsedTime"
+	// v0.12 — extended error coverage. These IDs are only emitted on the
+	// rc != CUDA_SUCCESS path; the success path keeps using the regular
+	// memcpy / memset / free / peer-copy / graph-launch metrics.
+	case 15:
+		return "cuMemFree_v2"
+	case 16:
+		return "cuMemFreeHost"
+	case 17:
+		return "cuMemFreeAsync"
+	case 18:
+		return "cuMemcpyHtoDAsync_v2"
+	case 19:
+		return "cuMemcpyDtoHAsync_v2"
+	case 20:
+		return "cuMemcpyDtoDAsync_v2"
+	case 21:
+		return "cuMemcpyPeer"
+	case 22:
+		return "cuMemcpyPeerAsync"
+	case 23:
+		return "cuMemsetD8_v2"
+	case 24:
+		return "cuMemsetD8Async"
+	case 25:
+		return "cuGraphLaunch"
 	default:
 		return "unknown"
 	}

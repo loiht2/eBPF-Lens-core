@@ -61,7 +61,7 @@ static __always_inline int hami_alloc_exit_impl(struct pt_regs *ctx, u8 cuda_fun
     if (!e) {
         return 0;
     }
-    e->flags        = 11; // k_event_hami_oom
+    e->flags        = k_event_hami_oom;
     e->cuda_func_id = cuda_func_id;
     e->mem_kind     = mem_kind;
     e->rc           = rc;
@@ -92,5 +92,7 @@ int BPF_KRETPROBE(obi_hami_cu_mem_host_alloc_exit) {
 
 SEC("uretprobe/hami_cuMemAllocAsync")
 int BPF_KRETPROBE(obi_hami_cu_mem_alloc_async_exit) {
-    return hami_alloc_exit_impl(ctx, CUDA_FUNC_ASYNC_MALLOC, CUDA_MEM_KIND_DEVICE);
+    // cuMemAllocAsync allocates from a stream-ordered memory pool; libcuda free
+    // path labels these as POOL, so we use the same kind here for consistency.
+    return hami_alloc_exit_impl(ctx, CUDA_FUNC_ASYNC_MALLOC, CUDA_MEM_KIND_POOL);
 }

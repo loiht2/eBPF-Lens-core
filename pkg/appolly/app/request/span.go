@@ -58,6 +58,7 @@ const (
 	EventTypeGPUCudaError
 	EventTypeGPUHamiOOM
 	EventTypeGPUHamiThrottle
+	EventTypeGPUCudaEventElapsed
 	EventTypeFailedConnect
 	EventTypeDNS
 	EventTypeCouchbaseClient
@@ -692,6 +693,19 @@ type Span struct {
 	AWS               *AWS           `json:"-"`
 	GenAI             *GenAI         `json:"-"`
 	JSONRPC           *JSONRPC       `json:"-"`
+	// GPUUuid is the physical GPU UUID observed for this event, populated by the
+	// gpuevent tracer from the HAMi cache poller PID index (only-HAMi) or from
+	// CUDA_VISIBLE_DEVICES in /proc/<pid>/environ (only-MIG). Empty when unknown.
+	GPUUuid           string         `json:"-"`
+
+	// GPU-specific event fields populated by the gpuevent tracer for downstream
+	// correlation. Kept internal (json:"-") and intentionally NOT exposed as
+	// Prometheus labels — handles are high-cardinality opaque pointers and would
+	// explode label storage. Future exporters may surface them as aggregated
+	// histograms or trace attributes.
+	GPUSharedMemBytes uint32 `json:"-"` // dynamic shared memory bytes for kernel launches
+	GPUStreamHandle   uint64 `json:"-"` // CUstream handle for launches, async memcpy/free/memset, stream sync
+	GPUEventHandle    uint64 `json:"-"` // CUevent handle for cuEventSynchronize spans
 
 	// RequestHeaders stores extracted HTTP request headers based on enrichment rules.
 	// Keys are canonical header names, values are all header values (possibly obfuscated).

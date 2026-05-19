@@ -214,6 +214,8 @@ type metricsReporter struct {
 	attrCudaMemoryAllocs       []attributes.Field[*request.Span, string]
 	attrCudaKernelGridSize     []attributes.Field[*request.Span, string]
 	attrCudaKernelBlockSize    []attributes.Field[*request.Span, string]
+	attrCudaKernelSharedMem    []attributes.Field[*request.Span, string]
+	attrCudaEventElapsed       []attributes.Field[*request.Span, string]
 	attrCudaMemoryCopies       []attributes.Field[*request.Span, string]
 	attrCudaStreamSync         []attributes.Field[*request.Span, string]
 	attrCudaDeviceSync         []attributes.Field[*request.Span, string]
@@ -253,6 +255,8 @@ type metricsReporter struct {
 	cudaMemoryAllocsTotal *Expirer[prometheus.Counter]
 	cudaKernelGridSize    *Expirer[prometheus.Histogram]
 	cudaKernelBlockSize   *Expirer[prometheus.Histogram]
+	cudaKernelSharedMem   *Expirer[prometheus.Histogram]
+	cudaEventElapsedDur   *Expirer[prometheus.Histogram]
 	cudaMemoryCopySize    *Expirer[prometheus.Histogram]
 	cudaStreamSyncDur     *Expirer[prometheus.Histogram]
 	cudaDeviceSyncDur     *Expirer[prometheus.Histogram]
@@ -407,6 +411,8 @@ func newReporter(
 	var attrCudaMemoryAllocations []attributes.Field[*request.Span, string]
 	var attrCudaKernelGridSize []attributes.Field[*request.Span, string]
 	var attrCudaKernelBlockSize []attributes.Field[*request.Span, string]
+	var attrCudaKernelSharedMem []attributes.Field[*request.Span, string]
+	var attrCudaEventElapsed []attributes.Field[*request.Span, string]
 	var attrCudaMemoryCopies []attributes.Field[*request.Span, string]
 	var attrCudaStreamSync []attributes.Field[*request.Span, string]
 	var attrCudaDeviceSync []attributes.Field[*request.Span, string]
@@ -430,6 +436,10 @@ func newReporter(
 			attrsProvider.For(attributes.GPUCudaKernelGridSize))
 		attrCudaKernelBlockSize = attributes.PrometheusGetters(attributeGetters,
 			attrsProvider.For(attributes.GPUCudaKernelBlockSize))
+		attrCudaKernelSharedMem = attributes.PrometheusGetters(attributeGetters,
+			attrsProvider.For(attributes.GPUCudaKernelSharedMemoryBytes))
+		attrCudaEventElapsed = attributes.PrometheusGetters(attributeGetters,
+			attrsProvider.For(attributes.GPUCudaEventElapsedDuration))
 		attrCudaMemoryCopies = attributes.PrometheusGetters(attributeGetters,
 			attrsProvider.For(attributes.GPUCudaMemoryCopies))
 		attrCudaStreamSync = attributes.PrometheusGetters(attributeGetters,
@@ -532,6 +542,8 @@ func newReporter(
 		attrCudaMemoryAllocs:       attrCudaMemoryAllocations,
 		attrCudaKernelGridSize:     attrCudaKernelGridSize,
 		attrCudaKernelBlockSize:    attrCudaKernelBlockSize,
+		attrCudaKernelSharedMem:    attrCudaKernelSharedMem,
+		attrCudaEventElapsed:       attrCudaEventElapsed,
 		attrCudaMemoryCopies:       attrCudaMemoryCopies,
 		attrCudaStreamSync:         attrCudaStreamSync,
 		attrCudaDeviceSync:         attrCudaDeviceSync,
@@ -787,6 +799,26 @@ func newReporter(
 				NativeHistogramMinResetDuration: defaultHistogramMinResetDuration,
 			}, labelNames(attrCudaKernelBlockSize)).MetricVec, clock.Time, cfg.TTL)
 		}),
+		cudaKernelSharedMem: optionalHistogramProvider(is.GPUEnabled(), func() *Expirer[prometheus.Histogram] {
+			return NewExpirer[prometheus.Histogram](prometheus.NewHistogramVec(prometheus.HistogramOpts{
+				Name:                            attributes.GPUCudaKernelSharedMemoryBytes.Prom,
+				Help:                            "dynamic shared memory bytes requested by the NVIDIA GPU cuda kernel launch (cuLaunchKernel arg 8, cuLaunchKernelEx CUlaunchConfig.sharedMemBytes)",
+				Buckets:                         cfg.Buckets.RequestSizeHistogram,
+				NativeHistogramBucketFactor:     defaultHistogramBucketFactor,
+				NativeHistogramMaxBucketNumber:  defaultHistogramMaxBucketNumber,
+				NativeHistogramMinResetDuration: defaultHistogramMinResetDuration,
+			}, labelNames(attrCudaKernelSharedMem)).MetricVec, clock.Time, cfg.TTL)
+		}),
+		cudaEventElapsedDur: optionalHistogramProvider(is.GPUEnabled(), func() *Expirer[prometheus.Histogram] {
+			return NewExpirer[prometheus.Histogram](prometheus.NewHistogramVec(prometheus.HistogramOpts{
+				Name:                            attributes.GPUCudaEventElapsedDuration.Prom,
+				Help:                            "GPU-side elapsed time reported by cuEventElapsedTime in seconds — actual on-device runtime between two recorded CUevents (the only non-CUPTI way to measure GPU compute duration)",
+				Buckets:                         cfg.Buckets.DurationHistogram,
+				NativeHistogramBucketFactor:     defaultHistogramBucketFactor,
+				NativeHistogramMaxBucketNumber:  defaultHistogramMaxBucketNumber,
+				NativeHistogramMinResetDuration: defaultHistogramMinResetDuration,
+			}, labelNames(attrCudaEventElapsed)).MetricVec, clock.Time, cfg.TTL)
+		}),
 		cudaMemoryCopySize: optionalHistogramProvider(is.GPUEnabled(), func() *Expirer[prometheus.Histogram] {
 			return NewExpirer[prometheus.Histogram](prometheus.NewHistogramVec(prometheus.HistogramOpts{
 				Name:                            attributes.GPUCudaMemoryCopies.Prom,
@@ -1020,6 +1052,8 @@ func newReporter(
 			mr.cudaMemoryAllocsTotal,
 			mr.cudaKernelGridSize,
 			mr.cudaKernelBlockSize,
+			mr.cudaKernelSharedMem,
+			mr.cudaEventElapsedDur,
 			mr.cudaMemoryCopySize,
 			mr.cudaStreamSyncDur,
 			mr.cudaDeviceSyncDur,
@@ -1031,6 +1065,8 @@ func newReporter(
 			mr.cudaKernelLaunchDur,
 			mr.cudaMemoryAllocCalls,
 			mr.cudaErrors,
+			mr.hamiOOMEvents,
+			mr.hamiThrottleDuration,
 		)
 	}
 
@@ -1257,6 +1293,8 @@ func (r *metricsReporter) observe(span *request.Span) {
 				r.addCounter(r.cudaKernelCallsTotal.WithLabelValues(labelValues(span, r.attrCudaKernelCalls)...).Metric, 1, span)
 				r.observeHistogram(r.cudaKernelGridSize.WithLabelValues(labelValues(span, r.attrCudaKernelGridSize)...).Metric, float64(span.ContentLength), span)
 				r.observeHistogram(r.cudaKernelBlockSize.WithLabelValues(labelValues(span, r.attrCudaKernelBlockSize)...).Metric, float64(span.SubType), span)
+				// Surface dynamic shared memory bytes captured by the BPF probe (arg 8 of cuLaunchKernel).
+				r.observeHistogram(r.cudaKernelSharedMem.WithLabelValues(labelValues(span, r.attrCudaKernelSharedMem)...).Metric, float64(span.GPUSharedMemBytes), span)
 			}
 		case request.EventTypeGPUCudaGraphLaunch:
 			if r.is.GPUEnabled() {
@@ -1315,6 +1353,13 @@ func (r *metricsReporter) observe(span *request.Span) {
 		case request.EventTypeGPUHamiThrottle:
 			if r.is.GPUEnabled() {
 				r.observeHistogram(r.hamiThrottleDuration.WithLabelValues(labelValues(span, r.attrHamiThrottleDuration)...).Metric, duration, span)
+			}
+		case request.EventTypeGPUCudaEventElapsed:
+			if r.is.GPUEnabled() {
+				// `duration` is already in seconds via Timings() — derived from
+				// span.End - span.RequestStart which the reader set to the
+				// elapsed_ns from cuEventElapsedTime.
+				r.observeHistogram(r.cudaEventElapsedDur.WithLabelValues(labelValues(span, r.attrCudaEventElapsed)...).Metric, duration, span)
 			}
 		case request.EventTypeDNS:
 			if r.is.DNSEnabled() {

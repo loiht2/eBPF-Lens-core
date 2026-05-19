@@ -258,6 +258,12 @@ const (
 	CudaFunction    = Name("cuda.function")       // CUDA API function name (e.g. cudaLaunchKernel)
 	CudaErrorCode   = Name("cuda.error.code")     // cudaError_t integer value
 
+	// GPUUuid is the parent physical GPU UUID (e.g. "GPU-abc…") observed by the workload.
+	// In only-HAMi mode: sourced from shared_region_t.uuids[] via the cache poller's PID index.
+	// In only-MIG mode: sourced from CUDA_VISIBLE_DEVICES / NVIDIA_VISIBLE_DEVICES env of the
+	// workload process (read once from /proc/<pid>/environ and cached per PID).
+	GPUUuid = Name("gpu.uuid")
+
 	// HAMi-specific attributes (only-HAMi mode)
 	HamiOOMMemKind   = Name("hami.oom.mem_kind")   // memory kind that triggered HAMi quota OOM
 	HamiOOMErrorCode = Name("hami.oom.error_code")  // CUresult error code from HAMi OOM

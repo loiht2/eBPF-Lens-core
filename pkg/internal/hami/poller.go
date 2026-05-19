@@ -65,13 +65,50 @@ func (p *Poller) Run(ctx context.Context, emit func(ContainerSample)) {
 	}
 }
 
+// effectiveContainerDir returns the first accessible path for containerDir,
+// trying the direct path first, then /proc/1/root prefix.
+// The agent DaemonSet may not mount the HAMi directory as a volume, but with
+// hostPID=true + privileged=true the host filesystem is reachable via /proc/1/root.
+func (p *Poller) effectiveContainerDir() string {
+	if _, err := os.Stat(p.containerDir); err == nil {
+		return p.containerDir
+	}
+	hostPath := "/proc/1/root" + p.containerDir
+	if _, err := os.Stat(hostPath); err == nil {
+		return hostPath
+	}
+	return p.containerDir // return original so caller gets a meaningful error
+}
+
 func (p *Poller) poll(emit func(ContainerSample)) {
-	entries, err := os.ReadDir(p.containerDir)
+	dir := p.effectiveContainerDir()
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if !os.IsNotExist(err) {
-			plog().Warn("cannot read HAMi container dir", "path", p.containerDir, "err", err)
+			plog().Warn("cannot read HAMi container dir", "path", dir, "err", err)
 		}
 		return
+	}
+
+	// Build a fresh PID→Binding snapshot while emitting samples.
+	// Register all process-device pairs seen in the cache file — a process
+	// appears after cuInit, before any memory allocation, so filtering by
+	// memory usage would drop the binding before the first BPF event fires.
+	snapshot := make(map[int32][]Binding, 256)
+
+	wrappedEmit := func(s ContainerSample) {
+		for _, proc := range s.Procs {
+			for d, dev := range s.Devices {
+				b := Binding{
+					PodUID:        s.PodUID,
+					ContainerName: s.ContainerName,
+					DeviceIndex:   d,
+					GPUUUID:       dev.UUID,
+				}
+				snapshot[proc.HostPID] = append(snapshot[proc.HostPID], b)
+			}
+		}
+		emit(s)
 	}
 
 	for _, entry := range entries {
@@ -82,9 +119,11 @@ func (p *Poller) poll(emit func(ContainerSample)) {
 		if !ok {
 			continue
 		}
-		dirPath := filepath.Join(p.containerDir, entry.Name())
-		p.pollDir(dirPath, podUID, containerName, emit)
+		dirPath := filepath.Join(dir, entry.Name())
+		p.pollDir(dirPath, podUID, containerName, wrappedEmit)
 	}
+
+	DefaultPIDIndex().Replace(snapshot)
 }
 
 // pollDir scans one {podUID}_{containerName}/ directory for .cache files
@@ -110,22 +149,31 @@ func (p *Poller) pollDir(dirPath, podUID, containerName string, emit func(Contai
 	}
 }
 
-// parseDirName splits "{podUID}_{containerName}" into its two parts.
-// The pod UID is a standard UUID (contains hyphens); the first underscore
-// after the UUID is the separator.
+// parseDirName parses the container directory name into (podUID, containerName).
 //
-// Format: {36-char UUID}_{containerName}
-// Example: 4d3f2e1a-0000-0000-0000-000000000001_mycontainer
+// Two formats are supported:
+//
+//	Format A (device-plugin mode): {36-char UUID}_{containerName}
+//	  Example: 4d3f2e1a-0000-0000-0000-000000000001_mycontainer
+//
+//	Format B (DRA mode): {36-char UUID}  (ResourceClaim UID, no container suffix)
+//	  Example: e9fd2003-f1b3-495e-b6a6-79451e88c61f
+//
+// For Format B the returned containerName is "".
 func parseDirName(name string) (podUID, containerName string, ok bool) {
-	// Pod UIDs are 36 chars (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx).
-	// Find the first underscore after position 36.
-	if len(name) < 38 { // 36 + '_' + at least 1 char
+	if len(name) < 36 {
 		return "", "", false
 	}
-	idx := strings.Index(name[36:], "_")
-	if idx < 0 {
+	// Validate UUID shape at fixed hyphen positions.
+	if name[8] != '-' || name[13] != '-' || name[18] != '-' || name[23] != '-' {
 		return "", "", false
 	}
-	sep := 36 + idx
-	return name[:sep], name[sep+1:], true
+	if len(name) == 36 {
+		// Format B: plain UUID (DRA mode — dir is the ResourceClaim UID).
+		return name, "", true
+	}
+	if name[36] != '_' || len(name) < 38 {
+		return "", "", false
+	}
+	return name[:36], name[37:], true
 }

@@ -4,10 +4,15 @@
 package gpuevent // import "go.opentelemetry.io/obi/pkg/internal/ebpf/gpuevent"
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"math"
+	"os"
+	"strings"
 	"sync"
 
 	"github.com/cilium/ebpf"
@@ -21,11 +26,12 @@ import (
 	"go.opentelemetry.io/obi/pkg/export/imetrics"
 	"go.opentelemetry.io/obi/pkg/internal/ebpf/ringbuf"
 	"go.opentelemetry.io/obi/pkg/internal/goexec"
+	"go.opentelemetry.io/obi/pkg/internal/hami"
 	"go.opentelemetry.io/obi/pkg/obi"
 	"go.opentelemetry.io/obi/pkg/pipe/msg"
 )
 
-//go:generate $BPF2GO -cc $BPF_CLANG -cflags $BPF_CFLAGS -type cuda_kernel_launch_t -type cuda_graph_launch_t -type cuda_malloc_t -type cuda_memcpy_t -type cuda_sync_t -type cuda_free_t -type cuda_memset_t -type cuda_peer_copy_t -type cuda_kernel_launch_done_t -type cuda_error_t -type hami_oom_t -type hami_throttle_t -target amd64,arm64 Bpf ../../../../bpf/gpuevent/gpuevent.c -- -I../../../../bpf
+//go:generate $BPF2GO -cc $BPF_CLANG -cflags $BPF_CFLAGS -type cuda_kernel_launch_t -type cuda_graph_launch_t -type cuda_malloc_t -type cuda_memcpy_t -type cuda_sync_t -type cuda_free_t -type cuda_memset_t -type cuda_peer_copy_t -type cuda_kernel_launch_done_t -type cuda_error_t -type hami_oom_t -type hami_throttle_t -type cuda_event_elapsed_t -target amd64,arm64 Bpf ../../../../bpf/gpuevent/gpuevent.c -- -I../../../../bpf
 
 const (
 	EventTypeKernelLaunch     = 1  // EVENT_CUDA_KERNEL_LAUNCH
@@ -40,6 +46,7 @@ const (
 	EventTypeError            = 10 // EVENT_CUDA_ERROR
 	EventTypeHamiOOM          = 11 // EVENT_HAMI_OOM
 	EventTypeHamiThrottle     = 12 // EVENT_HAMI_THROTTLE
+	EventTypeEventElapsed     = 13 // EVENT_CUDA_EVENT_ELAPSED — GPU time from cuEventElapsedTime
 
 	// Memory kind constants (mirror C #defines)
 	MemKindDevice  = 1
@@ -63,6 +70,10 @@ const (
 	CudaFuncSyncStream    = 8
 	CudaFuncSyncDevice    = 9
 	CudaFuncSyncEvent     = 10
+	CudaFuncPoolMalloc    = 11
+	CudaFuncHostRegister  = 12
+	CudaFuncHostUnregister = 13
+	CudaFuncEventElapsed  = 14
 )
 
 type pidKey struct {
@@ -83,6 +94,7 @@ type (
 	GPUCudaErrorInfo            BpfCudaErrorT
 	GPUHamiOOMInfo              BpfHamiOomT
 	GPUHamiThrottleInfo         BpfHamiThrottleT
+	GPUEventElapsedInfo         BpfCudaEventElapsedT
 )
 
 // TODO: We have a way to bring ELF file information to this Tracer struct
@@ -99,6 +111,10 @@ type Tracer struct {
 	instrumentedLibs ebpfcommon.InstrumentedLibsT
 	libsMux          sync.Mutex
 	pidMap           map[pidKey]uint64
+	// gpuUUIDCache caches the GPU UUID resolved from /proc/<pid>/environ per host PID.
+	// Used as the MIG-mode fallback when the HAMi PIDIndex has no entry for this PID.
+	// Entries are populated lazily on first event for each PID and evicted in BlockPID.
+	gpuUUIDCache sync.Map // map[int32]string
 }
 
 func New(pidFilter ebpfcommon.ServiceFilter, cfg *obi.Config, metrics imetrics.Reporter) *Tracer {
@@ -123,6 +139,96 @@ func (p *Tracer) AllowPID(pid app.PID, ns uint32, svc *svc.Attrs) {
 
 func (p *Tracer) BlockPID(pid app.PID, ns uint32) {
 	p.pidsFilter.BlockPID(pid, ns)
+	p.gpuUUIDCache.Delete(int32(pid))
+}
+
+// withGPUUUID enriches a span with the physical GPU UUID for its PID.
+// Resolution order (all results are cached in gpuUUIDCache per host PID):
+//  1. HAMi PIDIndex (device-plugin mode): populated by cache poller every ~1 s.
+//     Only works when libvgpu.so records the real host PID as hostpid in the cache.
+//  2. CUDA_DEVICE_MEMORY_SHARED_CACHE env var (HAMi DRA mode): read the cache file
+//     pointed to by the env var and return sr.uuids[0].
+//  3. NVIDIA_VISIBLE_DEVICES / CUDA_VISIBLE_DEVICES with MIG- prefix (only-MIG mode).
+//
+// Returns the span unchanged when all sources return empty.
+func (p *Tracer) withGPUUUID(span request.Span) request.Span {
+	hostPID := int32(span.Pid.HostPID)
+
+	// 1. HAMi PIDIndex (fast path; populated by poller for device-plugin mode)
+	if uuid := hami.DefaultPIDIndex().LookupUUID(hostPID); uuid != "" {
+		span.GPUUuid = uuid
+		return span
+	}
+
+	// 2+3. /proc/environ: try HAMi DRA cache file, then MIG env var (one read, cached)
+	if v, ok := p.gpuUUIDCache.Load(hostPID); ok {
+		span.GPUUuid = v.(string)
+		return span
+	}
+	uuid := resolveGPUUUIDFromProc(hostPID)
+	p.gpuUUIDCache.Store(hostPID, uuid)
+	span.GPUUuid = uuid
+	return span
+}
+
+// resolveGPUUUIDFromProc reads /proc/<pid>/environ once and resolves the GPU UUID via:
+//  a. CUDA_DEVICE_MEMORY_SHARED_CACHE (HAMi DRA): open the cache file, return sr.uuids[0].
+//  b. CUDA_VISIBLE_DEVICES / NVIDIA_VISIBLE_DEVICES with "MIG-" prefix (only-MIG).
+func resolveGPUUUIDFromProc(pid int32) string {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", pid))
+	if err != nil {
+		return ""
+	}
+	var cachePath, visDevices string
+	for _, entry := range bytes.Split(data, []byte{0}) {
+		kv := bytes.SplitN(entry, []byte{'='}, 2)
+		if len(kv) != 2 {
+			continue
+		}
+		switch string(kv[0]) {
+		case "CUDA_DEVICE_MEMORY_SHARED_CACHE":
+			cachePath = strings.TrimSpace(string(kv[1]))
+		case "CUDA_VISIBLE_DEVICES", "NVIDIA_VISIBLE_DEVICES":
+			val := strings.TrimSpace(string(kv[1]))
+			if val != "" && val != "void" && val != "NoDevFiles" {
+				visDevices = val
+			}
+		}
+	}
+
+	// HAMi DRA: read UUID from the cache file (most reliable source)
+	if cachePath != "" {
+		if uuid := readUUIDFromCacheFile(cachePath); uuid != "" {
+			return uuid
+		}
+	}
+
+	// only-MIG: NVIDIA DRA injects "MIG-<uuid>" into NVIDIA_VISIBLE_DEVICES.
+	if visDevices != "" {
+		return strings.TrimPrefix(visDevices, "MIG-")
+	}
+	return ""
+}
+
+// readUUIDFromCacheFile opens a HAMi cudevshr.cache file and returns the GPU UUID
+// for device 0 (sr.uuids[0]).
+//
+// The agent container may not have the HAMi cache directory mounted as a volume.
+// With hostPID=true + privileged=true the host filesystem is reachable via
+// /proc/1/root/<path>, so we try both the direct path and the /proc/1/root prefix.
+func readUUIDFromCacheFile(path string) string {
+	for _, prefix := range []string{"", "/proc/1/root"} {
+		sr, err := hami.OpenSharedRegion(prefix + path)
+		if err != nil {
+			continue
+		}
+		sample := sr.Snapshot("", "")
+		sr.Close()
+		if len(sample.Devices) > 0 && sample.Devices[0].UUID != "" {
+			return sample.Devices[0].UUID
+		}
+	}
+	return ""
 }
 
 func (p *Tracer) LoadSpecs() ([]*ebpfcommon.SpecBundle, error) {
@@ -212,9 +318,18 @@ func (p *Tracer) UProbes() map[string]map[string][]*ebpfcommon.ProbeDesc {
 				Start: p.bpfObjects.ObiCuCoopLaunch,
 				End:   p.bpfObjects.ObiCuCoopLaunchExit,
 			}},
-			// Graph launches
+			// cuLaunchKernelEx — CUDA 11.4+; required by PyTorch 2.4+ (torch.compile / Inductor)
+			// and NCCL 2.20+ collectives. Required:false so older libcuda.so without
+			// this symbol does not break attachment on legacy clusters.
+			"cuLaunchKernelEx": {{
+				Start:    p.bpfObjects.ObiCuLaunchEx,
+				End:      p.bpfObjects.ObiCuLaunchExExit,
+				Required: false,
+			}},
+			// Graph launches (entry emits the launch event; exit is error-only)
 			"cuGraphLaunch": {{
 				Start: p.bpfObjects.ObiCuGraphLaunch,
+				End:   p.bpfObjects.ObiCuGraphLaunchExit,
 			}},
 			// Device memory alloc/free (entry + exit for size tracking)
 			"cuMemAlloc_v2": {{
@@ -237,38 +352,75 @@ func (p *Tracer) UProbes() map[string]map[string][]*ebpfcommon.ProbeDesc {
 				Start: p.bpfObjects.ObiCuMemAllocAsync,
 				End:   p.bpfObjects.ObiCuMemAllocAsyncExit,
 			}},
-			// Free probes
+			// cuMemAllocFromPoolAsync — required by PyTorch 2.1+ custom pool, NCCL 2.19+ scratch.
+			// Required:false so older libcuda.so (no symbol) does not break attachment.
+			"cuMemAllocFromPoolAsync": {{
+				Start:    p.bpfObjects.ObiCuMemAllocFromPool,
+				End:      p.bpfObjects.ObiCuMemAllocFromPoolExit,
+				Required: false,
+			}},
+			// cuMemHostRegister — pin existing host memory (NCCL staging buffers, PyTorch pin_memory=True).
+			"cuMemHostRegister": {{
+				Start:    p.bpfObjects.ObiCuMemHostRegister,
+				End:      p.bpfObjects.ObiCuMemHostRegisterExit,
+				Required: false,
+			}},
+			"cuMemHostUnregister": {{
+				Start:    p.bpfObjects.ObiCuMemHostUnregister,
+				End:      p.bpfObjects.ObiCuMemHostUnregisterExit,
+				Required: false,
+			}},
+			// cuEventElapsedTime — capture GPU time between two CUevents. Required:false because
+			// older inference workloads do not use event timing; we still want clusters without the
+			// symbol to attach cleanly.
+			"cuEventElapsedTime": {{
+				Start:    p.bpfObjects.ObiCuEventElapsed,
+				End:      p.bpfObjects.ObiCuEventElapsedExit,
+				Required: false,
+			}},
+			// Free probes — entry stashes inflight state, exit emits event only on rc==CUDA_SUCCESS.
 			"cuMemFree_v2": {{
 				Start: p.bpfObjects.ObiCuMemFree,
+				End:   p.bpfObjects.ObiCuMemFreeExit,
 			}},
 			"cuMemFreeHost": {{
 				Start: p.bpfObjects.ObiCuMemFreeHost,
+				End:   p.bpfObjects.ObiCuMemFreeHostExit,
 			}},
 			"cuMemFreeAsync": {{
 				Start: p.bpfObjects.ObiCuMemFreeAsync,
+				End:   p.bpfObjects.ObiCuMemFreeAsyncExit,
 			}},
-			// Memcpy probes (direction-tagged by function name)
+			// Memcpy probes — async variants only. Entry stashes (size, direction, stream);
+			// exit emits only on rc==CUDA_SUCCESS (submission accepted by driver).
 			"cuMemcpyHtoDAsync_v2": {{
 				Start: p.bpfObjects.ObiCuMemcpyHtod,
+				End:   p.bpfObjects.ObiCuMemcpyHtodExit,
 			}},
 			"cuMemcpyDtoHAsync_v2": {{
 				Start: p.bpfObjects.ObiCuMemcpyDtoh,
+				End:   p.bpfObjects.ObiCuMemcpyDtohExit,
 			}},
 			"cuMemcpyDtoDAsync_v2": {{
 				Start: p.bpfObjects.ObiCuMemcpyDtod,
+				End:   p.bpfObjects.ObiCuMemcpyDtodExit,
 			}},
 			"cuMemcpyPeer": {{
 				Start: p.bpfObjects.ObiCuMemcpyPeer,
+				End:   p.bpfObjects.ObiCuMemcpyPeerExit,
 			}},
 			"cuMemcpyPeerAsync": {{
 				Start: p.bpfObjects.ObiCuMemcpyPeerAsync,
+				End:   p.bpfObjects.ObiCuMemcpyPeerAsyncExit,
 			}},
-			// Memset probes
+			// Memset probes — entry stashes (size, is_async, stream); exit emits only on rc==CUDA_SUCCESS.
 			"cuMemsetD8_v2": {{
 				Start: p.bpfObjects.ObiCuMemset,
+				End:   p.bpfObjects.ObiCuMemsetExit,
 			}},
 			"cuMemsetD8Async": {{
 				Start: p.bpfObjects.ObiCuMemsetAsync,
+				End:   p.bpfObjects.ObiCuMemsetAsyncExit,
 			}},
 			// Synchronize probes (entry + exit for duration)
 			"cuStreamSynchronize": {{
@@ -383,6 +535,8 @@ func (p *Tracer) processCudaEvent(record *ringbuf.Record) (request.Span, bool, e
 		return p.readGPUHamiOOMIntoSpan(record)
 	case EventTypeHamiThrottle:
 		return p.readGPUHamiThrottleIntoSpan(record)
+	case EventTypeEventElapsed:
+		return p.readGPUEventElapsedIntoSpan(record)
 	default:
 		p.log.Error("unknown cuda event", "type", eventType)
 	}
@@ -398,7 +552,7 @@ func (p *Tracer) readGPUMallocIntoSpan(record *ringbuf.Record) (request.Span, bo
 
 	p.log.Debug("GPU Malloc", "event", event)
 
-	return request.Span{
+	return p.withGPUUUID(request.Span{
 		Type:          request.EventTypeGPUCudaMalloc,
 		ContentLength: event.Size,
 		SubType:       int(event.MemKind),
@@ -407,7 +561,7 @@ func (p *Tracer) readGPUMallocIntoSpan(record *ringbuf.Record) (request.Span, bo
 			UserPID:   app.PID(event.PidInfo.UserPid),
 			Namespace: event.PidInfo.Ns,
 		},
-	}, false, nil
+	}), false, nil
 }
 
 func (p *Tracer) readGPUMemcpyIntoSpan(record *ringbuf.Record) (request.Span, bool, error) {
@@ -418,16 +572,17 @@ func (p *Tracer) readGPUMemcpyIntoSpan(record *ringbuf.Record) (request.Span, bo
 
 	p.log.Debug("GPU Memcpy", "event", event)
 
-	return request.Span{
-		Type:          request.EventTypeGPUCudaMemcpy,
-		ContentLength: event.Size,
-		SubType:       int(event.Direction),
+	return p.withGPUUUID(request.Span{
+		Type:            request.EventTypeGPUCudaMemcpy,
+		ContentLength:   event.Size,
+		SubType:         int(event.Direction),
+		GPUStreamHandle: event.StreamHandle,
 		Pid: request.PidInfo{
 			HostPID:   app.PID(event.PidInfo.HostPid),
 			UserPID:   app.PID(event.PidInfo.UserPid),
 			Namespace: event.PidInfo.Ns,
 		},
-	}, false, nil
+	}), false, nil
 }
 
 func (p *Tracer) readGPUKernelLaunchIntoSpan(record *ringbuf.Record) (request.Span, bool, error) {
@@ -438,16 +593,23 @@ func (p *Tracer) readGPUKernelLaunchIntoSpan(record *ringbuf.Record) (request.Sp
 
 	p.log.Debug("GPU Kernel Launch", "event", event)
 
-	return request.Span{
-		Type:          request.EventTypeGPUCudaKernelLaunch,
-		ContentLength: int64(event.GridX * event.GridY * event.GridZ),
-		SubType:       int(event.BlockX * event.BlockY * event.BlockZ),
+	// Cast each dimension to uint64 before multiplication to prevent int32
+	// overflow when grid x*y*z exceeds 2^31 (e.g. large GEMM kernels).
+	gridTotal := uint64(uint32(event.GridX)) * uint64(uint32(event.GridY)) * uint64(uint32(event.GridZ))
+	blockTotal := uint64(uint32(event.BlockX)) * uint64(uint32(event.BlockY)) * uint64(uint32(event.BlockZ))
+
+	return p.withGPUUUID(request.Span{
+		Type:              request.EventTypeGPUCudaKernelLaunch,
+		ContentLength:     int64(gridTotal),
+		SubType:           int(blockTotal),
+		GPUSharedMemBytes: event.SharedMemBytes,
+		GPUStreamHandle:   event.StreamHandle,
 		Pid: request.PidInfo{
 			HostPID:   app.PID(event.PidInfo.HostPid),
 			UserPID:   app.PID(event.PidInfo.UserPid),
 			Namespace: event.PidInfo.Ns,
 		},
-	}, false, nil
+	}), false, nil
 }
 
 func (p *Tracer) readGPUGraphLaunchIntoSpan(record *ringbuf.Record) (request.Span, bool, error) {
@@ -458,14 +620,14 @@ func (p *Tracer) readGPUGraphLaunchIntoSpan(record *ringbuf.Record) (request.Spa
 
 	p.log.Debug("GPU Graph Launch", "event", event)
 
-	return request.Span{
+	return p.withGPUUUID(request.Span{
 		Type: request.EventTypeGPUCudaGraphLaunch,
 		Pid: request.PidInfo{
 			HostPID:   app.PID(event.PidInfo.HostPid),
 			UserPID:   app.PID(event.PidInfo.UserPid),
 			Namespace: event.PidInfo.Ns,
 		},
-	}, false, nil
+	}), false, nil
 }
 
 // readGPUSyncIntoSpan decodes a synchronize event and stores timing so Timings() yields duration.
@@ -493,7 +655,11 @@ func (p *Tracer) readGPUSyncIntoSpan(record *ringbuf.Record) (request.Span, bool
 		eventType = request.EventTypeGPUCudaEventSync
 	}
 
-	return request.Span{
+	// For stream/event sync, the handle is the CUstream/CUevent argument.
+	// For device sync (cuCtxSynchronize), handle is 0 (current context not
+	// available from BPF). Surface as GPUStreamHandle for stream sync, and
+	// GPUEventHandle for event sync.
+	span := request.Span{
 		Type:         eventType,
 		RequestStart: int64(event.EntryTs) + delta,
 		End:          int64(event.EntryTs) + int64(event.DurationNs) + delta,
@@ -502,7 +668,14 @@ func (p *Tracer) readGPUSyncIntoSpan(record *ringbuf.Record) (request.Span, bool
 			UserPID:   app.PID(event.PidInfo.UserPid),
 			Namespace: event.PidInfo.Ns,
 		},
-	}, false, nil
+	}
+	switch event.SyncKind {
+	case SyncKindEvent:
+		span.GPUEventHandle = event.Handle
+	default:
+		span.GPUStreamHandle = event.Handle
+	}
+	return p.withGPUUUID(span), false, nil
 }
 
 func (p *Tracer) readGPUFreeIntoSpan(record *ringbuf.Record) (request.Span, bool, error) {
@@ -513,16 +686,17 @@ func (p *Tracer) readGPUFreeIntoSpan(record *ringbuf.Record) (request.Span, bool
 
 	p.log.Debug("GPU Free", "kind", event.MemKind, "size", event.Size)
 
-	return request.Span{
-		Type:          request.EventTypeGPUCudaFree,
-		ContentLength: event.Size,
-		SubType:       int(event.MemKind),
+	return p.withGPUUUID(request.Span{
+		Type:            request.EventTypeGPUCudaFree,
+		ContentLength:   event.Size,
+		SubType:         int(event.MemKind),
+		GPUStreamHandle: event.StreamHandle,
 		Pid: request.PidInfo{
 			HostPID:   app.PID(event.PidInfo.HostPid),
 			UserPID:   app.PID(event.PidInfo.UserPid),
 			Namespace: event.PidInfo.Ns,
 		},
-	}, false, nil
+	}), false, nil
 }
 
 func (p *Tracer) readGPUMemsetIntoSpan(record *ringbuf.Record) (request.Span, bool, error) {
@@ -533,16 +707,17 @@ func (p *Tracer) readGPUMemsetIntoSpan(record *ringbuf.Record) (request.Span, bo
 
 	p.log.Debug("GPU Memset", "async", event.IsAsync, "size", event.Size)
 
-	return request.Span{
-		Type:          request.EventTypeGPUCudaMemset,
-		ContentLength: event.Size,
-		SubType:       int(event.IsAsync),
+	return p.withGPUUUID(request.Span{
+		Type:            request.EventTypeGPUCudaMemset,
+		ContentLength:   event.Size,
+		SubType:         int(event.IsAsync),
+		GPUStreamHandle: event.StreamHandle,
 		Pid: request.PidInfo{
 			HostPID:   app.PID(event.PidInfo.HostPid),
 			UserPID:   app.PID(event.PidInfo.UserPid),
 			Namespace: event.PidInfo.Ns,
 		},
-	}, false, nil
+	}), false, nil
 }
 
 func (p *Tracer) readGPUPeerCopyIntoSpan(record *ringbuf.Record) (request.Span, bool, error) {
@@ -553,17 +728,18 @@ func (p *Tracer) readGPUPeerCopyIntoSpan(record *ringbuf.Record) (request.Span, 
 
 	p.log.Debug("GPU Peer Copy", "src", event.SrcDevice, "dst", event.DstDevice, "size", event.Size)
 
-	return request.Span{
+	return p.withGPUUUID(request.Span{
 		Type:          request.EventTypeGPUCudaPeerCopy,
 		ContentLength: event.Size,
 		// Pack src/dst device IDs: src in high 16 bits, dst in low 16 bits
-		SubType: int(event.SrcDevice)<<16 | int(event.DstDevice)&0xFFFF,
+		SubType:         int(event.SrcDevice)<<16 | int(event.DstDevice)&0xFFFF,
+		GPUStreamHandle: event.StreamHandle,
 		Pid: request.PidInfo{
 			HostPID:   app.PID(event.PidInfo.HostPid),
 			UserPID:   app.PID(event.PidInfo.UserPid),
 			Namespace: event.PidInfo.Ns,
 		},
-	}, false, nil
+	}), false, nil
 }
 
 // readGPUKernelLaunchDoneIntoSpan decodes a kernel-launch-done event, providing
@@ -580,7 +756,7 @@ func (p *Tracer) readGPUKernelLaunchDoneIntoSpan(record *ringbuf.Record) (reques
 	bpfNow := int64(event.EntryTs) + int64(event.DurationNs)
 	delta := monoNow - bpfNow
 
-	return request.Span{
+	return p.withGPUUUID(request.Span{
 		Type:         request.EventTypeGPUCudaKernelLaunchDone,
 		RequestStart: int64(event.EntryTs) + delta,
 		End:          int64(event.EntryTs) + int64(event.DurationNs) + delta,
@@ -590,7 +766,7 @@ func (p *Tracer) readGPUKernelLaunchDoneIntoSpan(record *ringbuf.Record) (reques
 			UserPID:   app.PID(event.PidInfo.UserPid),
 			Namespace: event.PidInfo.Ns,
 		},
-	}, false, nil
+	}), false, nil
 }
 
 // readGPUErrorIntoSpan decodes a CUDA error event (non-zero cudaError_t return value).
@@ -602,7 +778,7 @@ func (p *Tracer) readGPUErrorIntoSpan(record *ringbuf.Record) (request.Span, boo
 
 	p.log.Debug("GPU CUDA Error", "func_id", event.FuncId, "error_code", event.ErrorCode)
 
-	return request.Span{
+	return p.withGPUUUID(request.Span{
 		Type:          request.EventTypeGPUCudaError,
 		SubType:       int(event.ErrorCode), // cudaError_t value
 		ContentLength: int64(event.FuncId),  // CUDA_FUNC_* identifier → mapped to function name
@@ -611,7 +787,7 @@ func (p *Tracer) readGPUErrorIntoSpan(record *ringbuf.Record) (request.Span, boo
 			UserPID:   app.PID(event.PidInfo.UserPid),
 			Namespace: event.PidInfo.Ns,
 		},
-	}, false, nil
+	}), false, nil
 }
 
 // readGPUHamiOOMIntoSpan decodes a HAMi quota-OOM event from libvgpu.so.
@@ -625,16 +801,21 @@ func (p *Tracer) readGPUHamiOOMIntoSpan(record *ringbuf.Record) (request.Span, b
 
 	p.log.Debug("HAMi OOM", "func_id", event.CudaFuncId, "mem_kind", event.MemKind, "rc", event.Rc)
 
-	return request.Span{
+	// Pack mem_kind (high byte) and rc (low 24 bits) into SubType.
+	// Use uint32 + explicit 24-bit mask on rc to prevent sign-extension when
+	// HAMi returns a negative int32 (e.g. cuMemAllocAsync returns -1, which
+	// previously corrupted the mem_kind bits via Go's sign-extending int cast).
+	rc24 := int(uint32(event.Rc)) & 0xFFFFFF
+	return p.withGPUUUID(request.Span{
 		Type:          request.EventTypeGPUHamiOOM,
-		SubType:       (int(event.MemKind) << 24) | int(event.Rc),
+		SubType:       (int(event.MemKind) << 24) | rc24,
 		ContentLength: int64(event.CudaFuncId),
 		Pid: request.PidInfo{
 			HostPID:   app.PID(event.PidInfo.HostPid),
 			UserPID:   app.PID(event.PidInfo.UserPid),
 			Namespace: event.PidInfo.Ns,
 		},
-	}, false, nil
+	}), false, nil
 }
 
 // readGPUHamiThrottleIntoSpan decodes a HAMi compute-throttle event.
@@ -653,7 +834,7 @@ func (p *Tracer) readGPUHamiThrottleIntoSpan(record *ringbuf.Record) (request.Sp
 	end := monoNow
 	start := end - int64(event.DurationNs)
 
-	return request.Span{
+	return p.withGPUUUID(request.Span{
 		Type:         request.EventTypeGPUHamiThrottle,
 		RequestStart: start,
 		End:          end,
@@ -662,7 +843,47 @@ func (p *Tracer) readGPUHamiThrottleIntoSpan(record *ringbuf.Record) (request.Sp
 			UserPID:   app.PID(event.PidInfo.UserPid),
 			Namespace: event.PidInfo.Ns,
 		},
-	}, false, nil
+	}), false, nil
+}
+
+// readGPUEventElapsedIntoSpan decodes a cuEventElapsedTime success event.
+// The BPF probe captured the IEEE-754 float32 milliseconds bit pattern; Go
+// reinterprets it. Stream/event handles are stored on the span (internal)
+// but NOT exposed as Prometheus labels — they are opaque high-cardinality
+// pointers.
+//
+// RequestStart and End are anchored to "now" so End-RequestStart equals the
+// elapsed GPU duration in nanoseconds (mirrors the cuda_sync pattern so the
+// existing Timings() machinery works for histogram observation).
+func (p *Tracer) readGPUEventElapsedIntoSpan(record *ringbuf.Record) (request.Span, bool, error) {
+	event, err := ebpfcommon.ReinterpretCast[GPUEventElapsedInfo](record.RawSample)
+	if err != nil {
+		return request.Span{}, true, err
+	}
+
+	// Decode IEEE-754 float32 milliseconds → nanoseconds (int64).
+	// Defensive: clamp negative/NaN/inf to 0; cuEventElapsedTime should always return ms >= 0.
+	elapsedMs := math.Float32frombits(event.ElapsedMsBits)
+	var elapsedNs int64
+	if elapsedMs > 0 && !math.IsNaN(float64(elapsedMs)) && !math.IsInf(float64(elapsedMs), 0) {
+		elapsedNs = int64(float64(elapsedMs) * 1e6)
+	}
+
+	p.log.Debug("GPU Event Elapsed", "elapsed_ms", elapsedMs, "h_start", event.H_start, "h_end", event.H_end)
+
+	end := int64(monotime.Now())
+	start := end - elapsedNs
+	return p.withGPUUUID(request.Span{
+		Type:           request.EventTypeGPUCudaEventElapsed,
+		RequestStart:   start,
+		End:            end,
+		GPUEventHandle: event.H_start,
+		Pid: request.PidInfo{
+			HostPID:   app.PID(event.PidInfo.HostPid),
+			UserPID:   app.PID(event.PidInfo.UserPid),
+			Namespace: event.PidInfo.Ns,
+		},
+	}), false, nil
 }
 
 func (p *Tracer) SetEventContext(_ *ebpfcommon.EBPFEventContext) {}

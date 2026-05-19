@@ -109,6 +109,16 @@ var (
 		Prom:    "gpu_cuda_kernel_block_size_total",
 		OTEL:    "gpu.cuda.kernel.block.size",
 	}
+	GPUCudaKernelSharedMemoryBytes = Name{
+		Section: "gpu.cuda.kernel.shared_memory.bytes",
+		Prom:    "gpu_cuda_kernel_shared_memory_bytes",
+		OTEL:    "gpu.cuda.kernel.shared_memory.bytes",
+	}
+	GPUCudaEventElapsedDuration = Name{
+		Section: "gpu.cuda.event.elapsed.duration",
+		Prom:    "gpu_cuda_event_elapsed_seconds",
+		OTEL:    "gpu.cuda.event.elapsed.duration",
+	}
 	GPUCudaMemoryAllocations = Name{
 		Section: "gpu.cuda.memory.allocations",
 		Prom:    "gpu_cuda_memory_allocations_bytes_total",
