@@ -16,7 +16,6 @@ import (
 
 	"go.opentelemetry.io/obi/pkg/appolly/app"
 	"go.opentelemetry.io/obi/pkg/appolly/app/request"
-	"go.opentelemetry.io/obi/pkg/internal/hami"
 	"go.opentelemetry.io/obi/pkg/appolly/app/svc"
 	"go.opentelemetry.io/obi/pkg/appolly/discover/exec"
 	"go.opentelemetry.io/obi/pkg/appolly/meta"
@@ -161,10 +160,6 @@ type PrometheusConfig struct {
 	// beforehand. For example, to add the OTEL deployment.environment resource attribute as a Prometheus resource attribute,
 	// you should add `deployment.environment`.
 	ExtraSpanResourceLabels []string `yaml:"extra_span_resource_attributes" env:"OTEL_EBPF_PROMETHEUS_EXTRA_SPAN_RESOURCE_ATTRIBUTES" envSeparator:","`
-
-	// HAMiContainerDir is the host path containing {podUID}_{containerName}/ subdirectories
-	// written by HAMi-core. Set to "-" to disable. Defaults to /usr/local/vgpu/containers.
-	HAMiContainerDir string `yaml:"hami_container_dir" env:"OTEL_EBPF_HAMI_CONTAINER_DIR"`
 }
 
 func mlog() *slog.Logger {
@@ -293,10 +288,6 @@ type metricsReporter struct {
 
 	serviceMap  map[svc.UID]svc.Attrs
 	pidsTracker otel.PidServiceTracker
-
-	// HAMi cache poller
-	hamiMetrics *hamiGauges
-	hamiContDir string
 
 	// for testing purposes
 	createEventMetrics func(service *svc.Attrs)
@@ -1070,16 +1061,6 @@ func newReporter(
 		)
 	}
 
-	if is.GPUEnabled() && cfg.HAMiContainerDir != "-" {
-		mr.hamiMetrics = newHamiGauges()
-		contDir := cfg.HAMiContainerDir
-		if contDir == "" {
-			contDir = hami.DefaultContainerDir
-		}
-		mr.hamiContDir = contDir
-		registeredMetrics = append(registeredMetrics, mr.hamiMetrics.collectors()...)
-	}
-
 	if mr.cfg.Registry != nil {
 		mr.cfg.Registry.MustRegister(registeredMetrics...)
 	} else {
@@ -1137,7 +1118,6 @@ func (r *metricsReporter) reportMetrics(ctx context.Context) {
 }
 
 func (r *metricsReporter) collectMetrics(ctx context.Context) {
-	startHamiPoller(ctx, r.hamiMetrics, r.hamiContDir)
 	go r.watchForProcessEvents(ctx)
 	swarms.ForEachInput(ctx, r.input, nil, func(spans []request.Span) {
 		// clock needs to be updated to let the expirer
