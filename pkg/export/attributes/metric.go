@@ -91,102 +91,102 @@ var (
 	}
 	GPUCudaKernelLaunchCalls = Name{
 		Section: "gpu.cuda.kernel.launch.calls",
-		Prom:    "gpu_cuda_kernel_launch_calls_total",
+		Prom:    "ebpf_cuda_kernel_launch_calls_total",
 		OTEL:    "gpu.cuda.kernel.launch.calls",
 	}
 	GPUCudaGraphLaunchCalls = Name{
 		Section: "gpu.cuda.graph.launch.calls",
-		Prom:    "gpu_cuda_graph_launch_calls_total",
+		Prom:    "ebpf_cuda_graph_launch_calls_total",
 		OTEL:    "gpu.cuda.graph.launch.calls",
 	}
 	GPUCudaKernelGridSize = Name{
 		Section: "gpu.cuda.kernel.grid.size",
-		Prom:    "gpu_cuda_kernel_grid_size_total",
+		Prom:    "ebpf_cuda_kernel_grid_size_total",
 		OTEL:    "gpu.cuda.kernel.grid.size",
 	}
 	GPUCudaKernelBlockSize = Name{
 		Section: "gpu.cuda.kernel.block.size",
-		Prom:    "gpu_cuda_kernel_block_size_total",
+		Prom:    "ebpf_cuda_kernel_block_size_total",
 		OTEL:    "gpu.cuda.kernel.block.size",
 	}
 	GPUCudaKernelSharedMemoryBytes = Name{
 		Section: "gpu.cuda.kernel.shared_memory.bytes",
-		Prom:    "gpu_cuda_kernel_shared_memory_bytes",
+		Prom:    "ebpf_cuda_kernel_shared_memory_bytes",
 		OTEL:    "gpu.cuda.kernel.shared_memory.bytes",
 	}
 	GPUCudaEventElapsedDuration = Name{
 		Section: "gpu.cuda.event.elapsed.duration",
-		Prom:    "gpu_cuda_event_elapsed_seconds",
+		Prom:    "ebpf_cuda_event_elapsed_seconds",
 		OTEL:    "gpu.cuda.event.elapsed.duration",
 	}
 	GPUCudaMemoryAllocations = Name{
 		Section: "gpu.cuda.memory.allocations",
-		Prom:    "gpu_cuda_memory_allocations_bytes_total",
+		Prom:    "ebpf_cuda_memory_allocations_bytes_total",
 		OTEL:    "gpu.cuda.memory.allocations",
 	}
 	GPUCudaMemoryCopies = Name{
 		Section: "gpu.cuda.memory.copies",
-		Prom:    "gpu_cuda_memory_copies_bytes_total",
+		Prom:    "ebpf_cuda_memory_copies_bytes_total",
 		OTEL:    "gpu.cuda.memory.copies",
 	}
 	GPUCudaStreamSyncDuration = Name{
 		Section: "gpu.cuda.stream.sync.duration",
-		Prom:    "gpu_cuda_stream_sync_duration_seconds",
+		Prom:    "ebpf_cuda_stream_sync_duration_seconds",
 		OTEL:    "gpu.cuda.stream.sync.duration",
 	}
 	GPUCudaDeviceSyncDuration = Name{
 		Section: "gpu.cuda.device.sync.duration",
-		Prom:    "gpu_cuda_device_sync_duration_seconds",
+		Prom:    "ebpf_cuda_device_sync_duration_seconds",
 		OTEL:    "gpu.cuda.device.sync.duration",
 	}
 	GPUCudaEventSyncDuration = Name{
 		Section: "gpu.cuda.event.sync.duration",
-		Prom:    "gpu_cuda_event_sync_duration_seconds",
+		Prom:    "ebpf_cuda_event_sync_duration_seconds",
 		OTEL:    "gpu.cuda.event.sync.duration",
 	}
 	GPUCudaMemoryFrees = Name{
 		Section: "gpu.cuda.memory.frees",
-		Prom:    "gpu_cuda_memory_frees_bytes_total",
+		Prom:    "ebpf_cuda_memory_frees_bytes_total",
 		OTEL:    "gpu.cuda.memory.frees",
 	}
 	GPUCudaMemoryFreeCalls = Name{
 		Section: "gpu.cuda.memory.frees.calls",
-		Prom:    "gpu_cuda_memory_frees_calls_total",
+		Prom:    "ebpf_cuda_memory_frees_calls_total",
 		OTEL:    "gpu.cuda.memory.frees.calls",
 	}
 	GPUCudaMemoryMemset = Name{
 		Section: "gpu.cuda.memory.memset",
-		Prom:    "gpu_cuda_memory_memset_bytes_total",
+		Prom:    "ebpf_cuda_memory_memset_bytes_total",
 		OTEL:    "gpu.cuda.memory.memset",
 	}
 	GPUCudaMemoryPeerCopies = Name{
 		Section: "gpu.cuda.memory.peer.copies",
-		Prom:    "gpu_cuda_memory_peer_copies_bytes_total",
+		Prom:    "ebpf_cuda_memory_peer_copies_bytes_total",
 		OTEL:    "gpu.cuda.memory.peer.copies",
 	}
 	GPUCudaKernelLaunchDuration = Name{
 		Section: "gpu.cuda.kernel.launch.duration",
-		Prom:    "gpu_cuda_kernel_launch_duration_seconds",
+		Prom:    "ebpf_cuda_kernel_launch_duration_seconds",
 		OTEL:    "gpu.cuda.kernel.launch.duration",
 	}
 	GPUCudaMemoryAllocCalls = Name{
 		Section: "gpu.cuda.memory.allocations.calls",
-		Prom:    "gpu_cuda_memory_allocations_calls_total",
+		Prom:    "ebpf_cuda_memory_allocations_calls_total",
 		OTEL:    "gpu.cuda.memory.allocations.calls",
 	}
 	GPUCudaErrors = Name{
 		Section: "gpu.cuda.errors",
-		Prom:    "gpu_cuda_errors_total",
+		Prom:    "ebpf_cuda_errors_total",
 		OTEL:    "gpu.cuda.errors",
 	}
 	GPUHamiOOMEvents = Name{
 		Section: "gpu.hami.oom.events",
-		Prom:    "gpu_hami_oom_events_total",
+		Prom:    "ebpf_hami_oom_events_total",
 		OTEL:    "gpu.hami.oom.events",
 	}
 	GPUHamiThrottleDuration = Name{
 		Section: "gpu.hami.compute.throttle.duration",
-		Prom:    "gpu_hami_compute_throttle_duration_seconds",
+		Prom:    "ebpf_hami_compute_throttle_duration_seconds",
 		OTEL:    "gpu.hami.compute.throttle.duration",
 	}
 	DNSLookupDuration = Name{
